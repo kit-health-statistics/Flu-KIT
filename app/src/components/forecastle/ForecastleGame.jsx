@@ -659,7 +659,7 @@ setPreviousGame(previousGame);
   return (
     <>
       <Helmet>
-        <title>RespiLens | Forecastle</title>
+        <title>Flu@KIT</title>
       </Helmet>
       <Container size="xl" py="xl" style={{ maxWidth: '1100px' }}>
         {renderContent()}
