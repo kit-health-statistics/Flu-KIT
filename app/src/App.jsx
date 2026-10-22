@@ -4,7 +4,7 @@ import ForecastleGame from './components/forecastle/ForecastleGame';
 
 const App = () => (
   <HelmetProvider>
-    <Router>
+    <Router basename={import.meta.env.BASE_URL}>
       <Routes>
         <Route path="/" element={<ForecastleGame />} />
         <Route path="/forecastle" element={<ForecastleGame />} />

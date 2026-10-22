@@ -129,7 +129,7 @@ const ForecastleGame = () => {
   useEffect(() => {
     const loadData = async () => {
       try {
-        const response = await fetch('/processed_data/your-data.json');
+        const response = await fetch(`${import.meta.env.BASE_URL}processed_data/your-data.json`);
         if (!response.ok) {
           throw new Error(`Failed to load data: ${response.status}`);
         }
