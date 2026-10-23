@@ -29,8 +29,27 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - run: npm ci
       - run: npm run build
-      # SPA fallback so /forecastle also works on a direct visit or reload
-      - run: cp dist/index.html dist/404.html
+
+      - name: Encrypt index.html with StatiCrypt
+        working-directory: app/dist
+        env:
+          SITE_PASSWORD: ${{ secrets.SITE_PASSWORD }}
+          STATICRYPT_SALT: ${{ secrets.STATICRYPT_SALT }}
+        run: |
+          npx --yes staticrypt@3 index.html \
+            -p "$SITE_PASSWORD" \
+            --salt "$STATICRYPT_SALT" \
+            --short \
+            --remember 7 \
+            --template-title "Flu@KIT" \
+            --template-instructions "Please enter the password to continue." \
+            -d encrypted
+          mv encrypted/index.html index.html
+          rmdir encrypted
+          rm -f .staticrypt.json
+          # SPA fallback (now encrypted too), so /forecastle also asks for the password
+          cp index.html 404.html
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: app/dist
