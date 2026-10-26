@@ -1,0 +1,82 @@
+name: Update data
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"   # Mondays 00:00 UTC (01:00/02:00 in Germany)
+  workflow_dispatch:       # lets you run it manually for testing
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+env:
+  RAW_DIR: app/public/raw_data
+  PROCESSED_DIR: app/public/processed_data
+  PAST_DIR: app/public/past_data
+  RAW_FILE: GrippeWeb_Daten_des_Wochenberichts.tsv
+  SOURCE_URL: https://raw.githubusercontent.com/robert-koch-institut/GrippeWeb_Daten_des_Wochenberichts/main/GrippeWeb_Daten_des_Wochenberichts.tsv
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest TSV
+        run: |
+          mkdir -p "$RAW_DIR"
+          curl -fsSL "$SOURCE_URL" -o /tmp/new.tsv
+          test -s /tmp/new.tsv   # fail if empty
+
+      - name: Check whether the data changed
+        id: changed
+        run: |
+          if [ -f "$RAW_DIR/$RAW_FILE" ] && cmp -s /tmp/new.tsv "$RAW_DIR/$RAW_FILE"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "RKI file unchanged, nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: r-lib/actions/setup-r@v2
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          use-public-rspm: true
+
+      - name: Install R packages
+        if: steps.changed.outputs.changed == 'true'
+        run: Rscript -e 'install.packages("jsonlite")'
+
+      - name: Process new data (to a temp file first)
+        if: steps.changed.outputs.changed == 'true'
+        run: Rscript scripts/process_data.R /tmp/new.tsv /tmp/your-data.json
+
+      - name: Archive old JSON and install new files
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          mkdir -p "$PAST_DIR" "$PROCESSED_DIR"
+          DATE=$(date +%d.%m.%Y)
+          if [ -f "$PROCESSED_DIR/your-data.json" ]; then
+            mv "$PROCESSED_DIR/your-data.json" "$PAST_DIR/data-$DATE.json"
+          fi
+          cp /tmp/new.tsv "$RAW_DIR/$RAW_FILE"
+          cp /tmp/your-data.json "$PROCESSED_DIR/your-data.json"
+
+      - name: Commit and push
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$RAW_DIR" "$PROCESSED_DIR" "$PAST_DIR"
+          git diff --cached --quiet || git commit -m "Update data $(date +%d.%m.%Y)"
+          git push
+          
+      - name: Trigger deploy
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy.yml --ref "${{ github.ref_name }}"
