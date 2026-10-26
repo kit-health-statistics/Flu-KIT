@@ -142,8 +142,8 @@ export function saveForecastleGame(gameData) {
       userForecasts: gameData.userForecasts.map(f => ({
         horizon: f.horizon,
         median: f.median,
-        lower95: f.lower80,
-        upper95: f.upper80,
+        lower80: f.lower80,
+        upper80: f.upper80,
         width80: f.width80
       })),
       groundTruth: gameData.groundTruth,
