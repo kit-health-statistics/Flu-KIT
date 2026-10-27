@@ -176,23 +176,6 @@ const ForecastleInputControls = ({
             ]}
           />
         </Stack>
-      </Stack>
-      {/* Preview of applied intervals */}
-      <Stack gap="xs" mt="md">
-        <Text size="xs" fw={500} c="dimmed">Preview</Text>
-        <Group gap="xs" wrap="wrap">
-          {entries.map((entry, index) => (
-            <Stack key={horizonDates[index] || `preview-${index}`} gap={2} style={{ flex: '1 1 90px', minWidth: 0 }}>
-              <Text size="xs" c="dimmed" ta="center">
-                {formatWeekLabel(horizonDates[index])}
-              </Text>
-              <Text size="xs" fw={500} ta="center" c="red.7">
-                80%: [{Math.round(entry.lower80)}, {Math.round(entry.upper80)}]
-              </Text>
-            </Stack>
-          ))}
-        </Group>
-      </Stack>
     </Stack>
   );
 };
