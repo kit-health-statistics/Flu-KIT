@@ -120,6 +120,7 @@ const ForecastleGame = () => {
   const [submittedPayload, setSubmittedPayload] = useState(null);
   const [inputMode, setInputMode] = useState('median');
   const [zoomedView, setZoomedView] = useState(true);
+  const [showMoreSeasons, setShowMoreSeasons] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
   const [previousGame, setPreviousGame] = useState(null);
@@ -137,63 +138,35 @@ const ForecastleGame = () => {
         const { dates, wk_inc, season } = ground_truth;
 
         console.log('Raw data loaded:', { dates: dates?.length, wk_inc: wk_inc?.length, season: season?.length });
-        console.log('Unique seasons:', [...new Set(season)]);
 
-        // Extract seasons
+        // Extract seasons (the data is sorted chronologically, the last one is the current season)
         const uniqueSeasons = [...new Set(season)];
         const currentSeason = uniqueSeasons[uniqueSeasons.length - 1];
         const previousSeason = uniqueSeasons[uniqueSeasons.length - 2];
-	const twoBeforeSeason = uniqueSeasons[uniqueSeasons.length - 3];
-	const threeBeforeSeason = uniqueSeasons[uniqueSeasons.length - 4];
+        const twoBeforeSeason = uniqueSeasons[uniqueSeasons.length - 3];
+        const threeBeforeSeason = uniqueSeasons[uniqueSeasons.length - 4];
 
-        console.log('Current season:', currentSeason);
-        console.log('Previous season:', previousSeason);
-	console.log('Two years ago:', twoBeforeSeason);
-	console.log('Three years ago:', threeBeforeSeason);
+        console.log('Seasons (current, previous, two before, three before):',
+          currentSeason, previousSeason, twoBeforeSeason, threeBeforeSeason);
 
-        // Build current season series
-        const currentSeasonSeries = dates.map((date, index) => ({
-          date,
-          value: wk_inc[index],
-          season: season[index],
-        })).filter(item => item.season === currentSeason);
+        // Builds the {date, value, season} series of one season (empty if the season doesn't exist)
+        const buildSeasonSeries = (seasonName) => {
+          if (!seasonName) return [];
+          return dates
+            .map((date, index) => ({ date, value: wk_inc[index], season: season[index] }))
+            .filter((item) => item.season === seasonName);
+        };
 
-        console.log('Current season series length:', currentSeasonSeries.length);
+        const currentSeasonSeries = buildSeasonSeries(currentSeason);
+        let previousSeasonSeries = buildSeasonSeries(previousSeason);
+        let twoBeforeSeasonSeries = buildSeasonSeries(twoBeforeSeason);
+        let threeBeforeSeasonSeries = buildSeasonSeries(threeBeforeSeason);
 
-        // Build previous season series (for grey/red dashed line in background)
-        let previousSeasonSeries = [];
-        if (previousSeason) {
-          previousSeasonSeries = dates.map((date, index) => ({
-            date,
-            value: wk_inc[index],
-            season: season[index],
-          })).filter(item => item.season === previousSeason);
-        }
-
-	// Build season two years ago
-	let twoBeforeSeasonSeries = [];
-	if (twoBeforeSeason) {
-	  twoBeforeSeasonSeries = dates.map((date, index) => ({
-	    date,
-	    value: wk_inc[index],
-	    season: season[index],
-	  })).filter(item => item.season === twoBeforeSeason);
-	}
-
-	// Build season three years ago
-	let threeBeforeSeasonSeries = [];
-	if (threeBeforeSeason) {
-	  threeBeforeSeasonSeries = dates.map((date, index) => ({
-	    date,
-	    value: wk_inc[index],
-	    season: season[index],
-	  })).filter(item => item.season === threeBeforeSeason);
-	}
-
-        console.log('Previous season series length:', previousSeasonSeries.length);
-	console.log('Two years ago series length:', twoBeforeSeasonSeries.length);
-	console.log('Three years ago series length:', threeBeforeSeasonSeries.length);
-
+        console.log('Series lengths (current, previous, two before, three before):',
+          currentSeasonSeries.length,
+          previousSeasonSeries.length,
+          twoBeforeSeasonSeries.length,
+          threeBeforeSeasonSeries.length);
 
         // Truncate previous seasons to horizon + 3 weeks (only if we have data)
         const forecastDateIndex = dates.indexOf(playDate || dates[dates.length - 1]);
@@ -201,11 +174,8 @@ const ForecastleGame = () => {
           const horizonWeeks = 3;
           const endIndex = forecastDateIndex + horizonWeeks;
           previousSeasonSeries = previousSeasonSeries.slice(0, endIndex + 1);
-	  twoBeforeSeasonSeries = twoBeforeSeasonSeries.slice(0, endIndex + 1);
-	  threeBeforeSeasonSeries = threeBeforeSeasonSeries.slice(0, endIndex + 1);
-          console.log('Truncated previous season series length:', previousSeasonSeries.length);
-	  console.log('Truncated two years ago series length:', twoBeforeSeasonSeries.length);
-	  console.log('Truncated three years ago series length:', threeBeforeSeasonSeries.length);
+          twoBeforeSeasonSeries = twoBeforeSeasonSeries.slice(0, endIndex + 1);
+          threeBeforeSeasonSeries = threeBeforeSeasonSeries.slice(0, endIndex + 1);
         }
 
         const lastGroundTruthDate = dates[dates.length - 1];
@@ -223,8 +193,15 @@ const ForecastleGame = () => {
           horizons: metadata.hubverse_keys?.horizon || [1, 2, 3, 4],
           groundTruthSeries: currentSeasonSeries,
           previousSeasonSeries,
-	  twoBeforeSeasonSeries,
-	  threeBeforeSeasonSeries,
+          twoBeforeSeasonSeries,
+          threeBeforeSeasonSeries,
+          // Season names (e.g. "2025/26") for the chart legend
+          seasons: {
+            current: currentSeason,
+            previous: previousSeason,
+            twoBefore: twoBeforeSeason,
+            threeBefore: threeBeforeSeason,
+          },
           fullGroundTruthSeries: dates.map((date, index) => ({ date, value: wk_inc[index] })),
         };
 
@@ -233,8 +210,8 @@ const ForecastleGame = () => {
           forecastDate: scenario.forecastDate,
           groundTruthSeriesLength: scenario.groundTruthSeries.length,
           previousSeasonSeriesLength: scenario.previousSeasonSeries.length,
-	  twoBeforeSeasonSeriesLength: scenario.twoBeforeSeasonSeries.length,
-	  threeBeforeSeasonSeriesLength: scenario.threeBeforeSeasonSeries.length,
+          twoBeforeSeasonSeriesLength: scenario.twoBeforeSeasonSeries.length,
+          threeBeforeSeasonSeriesLength: scenario.threeBeforeSeasonSeries.length,
           horizons: scenario.horizons,
         });
 
@@ -410,15 +387,6 @@ const ForecastleGame = () => {
       );
     }
 
-    // Debug info - remove in production
-    console.log('Rendering chart with:', {
-      groundTruthSeriesLength: scenario.groundTruthSeries.length,
-      previousSeasonSeriesLength: scenario.previousSeasonSeries.length,
-      twoBeforeSeasonSeriesLength: scenario.twoBeforeSeasonSeries.length, 
-      threeBeforeSeasonSeriesLEngth: scenario.threeBeforeSeasonSeries.length,
-      horizonDates: scenario.horizons.map(h => addWeeksToDate(scenario.forecastDate, h)),
-    });
-
     const latestValue = Number.isFinite(latestObservationValue) ? latestObservationValue : 0;
     const baseMax = latestValue > 0 ? latestValue * 2 : 1;
     const userMaxCandidate = Math.max(
@@ -427,7 +395,12 @@ const ForecastleGame = () => {
     );
     const yAxisMax = Math.max(baseMax, userMaxCandidate * 1.1 || 0, latestObservationValue, 1);
     const horizonDates = scenario.horizons.map((horizon) => addWeeksToDate(scenario.forecastDate, horizon));
-    const chartHeight = isMobile ? 300 : 380;
+    // The legend needs some extra room when four seasons are listed on a narrow screen
+    const chartHeight = isMobile ? (showMoreSeasons ? 340 : 300) : 380;
+
+    // "Show More Seasons" only makes sense if the data contains older seasons
+    const hasMoreSeasons =
+      scenario.twoBeforeSeasonSeries.length > 0 || scenario.threeBeforeSeasonSeries.length > 0;
 
     const handleMedianAdjust = (index, field, value) => {
       setForecastEntries((prevEntries) =>
@@ -458,6 +431,47 @@ const ForecastleGame = () => {
       if (submittedPayload) {
         setSubmittedPayload(null);
       }
+    };
+
+    // Title + the two chart switches (shared by the median and the interval view)
+    const chartHeader = (
+      <Group justify="space-between" align="center" wrap="wrap" gap="xs">
+        <Title order={5}>Interactive Chart</Title>
+        <Group gap="md" wrap="wrap">
+          <Switch
+            label="Show Whole Season"
+            checked={!zoomedView}
+            onChange={(event) => setZoomedView(!event.currentTarget.checked)}
+            color="red"
+            size={isMobile ? 'sm' : 'md'}
+          />
+          {hasMoreSeasons && (
+            <Switch
+              label="Show More Seasons"
+              checked={showMoreSeasons}
+              onChange={(event) => setShowMoreSeasons(event.currentTarget.checked)}
+              color="red"
+              size={isMobile ? 'sm' : 'md'}
+            />
+          )}
+        </Group>
+      </Group>
+    );
+
+    // Props that are identical for both chart views
+    const sharedChartProps = {
+      groundTruthSeries: scenario.groundTruthSeries,
+      previousSeasonSeries: scenario.previousSeasonSeries,
+      twoBeforeSeasonSeries: scenario.twoBeforeSeasonSeries,
+      threeBeforeSeasonSeries: scenario.threeBeforeSeasonSeries,
+      seasonLabels: scenario.seasons,
+      showMoreSeasons,
+      horizonDates,
+      entries: forecastEntries,
+      maxValue: yAxisMax,
+      onAdjust: handleMedianAdjust,
+      height: chartHeight,
+      zoomedView,
     };
 
     return (
@@ -562,30 +576,9 @@ const ForecastleGame = () => {
                 <Grid gutter="lg">
                   <Grid.Col span={{ base: 12, lg: 7 }}>
                     <Stack gap="md">
-                      <Group justify="space-between">
-                        <Title order={5}>Interactive Chart</Title>
-                        <Switch
-                          label="Show Whole Season"
-                          checked={!zoomedView}
-                          onChange={(event) => setZoomedView(!event.currentTarget.checked)}
-                          color="red"
-                          size="md"
-                        />
-                      </Group>
+                      {chartHeader}
                       <Box style={{ width: '100%', height: chartHeight }}>
-                        <ForecastleChartCanvas
-                          groundTruthSeries={scenario.groundTruthSeries}
-                          previousSeasonSeries={scenario.previousSeasonSeries}
-			  twoBeforeSeasonSeries={scenario.twoBeforeSeasonSeries}
-			  threeBeforeSeasonSeries={scenario.threeBeforeSeasonSeries}
-                          horizonDates={horizonDates}
-                          entries={forecastEntries}
-                          maxValue={yAxisMax}
-                          onAdjust={handleMedianAdjust}
-                          height={chartHeight}
-                          showIntervals={true}
-                          zoomedView={zoomedView}
-                        />
+                        <ForecastleChartCanvas {...sharedChartProps} showIntervals={true} />
                       </Box>
                       <Text size="sm" c="dimmed">
                         Drag the handles to adjust interval bounds, or use the sliders for precise control.
@@ -631,30 +624,9 @@ const ForecastleGame = () => {
                 <Grid gutter="lg">
                   <Grid.Col span={{ base: 12, lg: 7 }}>
                     <Stack gap="md">
-                      <Group justify="space-between">
-                        <Title order={5}>Interactive Chart</Title>
-                        <Switch
-                          label="Show Whole Season"
-                          checked={!zoomedView}
-                          onChange={(event) => setZoomedView(!event.currentTarget.checked)}
-                          color="red"
-                          size="md"
-                        />
-                      </Group>
+                      {chartHeader}
                       <Box style={{ width: '100%', height: chartHeight }}>
-                        <ForecastleChartCanvas
-                          groundTruthSeries={scenario.groundTruthSeries}
-                          previousSeasonSeries={scenario.previousSeasonSeries}
-			  twoBeforeSeasonSeries={scenario.twoBeforeSeasonSeries}
-			  threeBeforeSeasonSeries={scenario.threeBeforeSeasonSeries}
-                          horizonDates={horizonDates}
-                          entries={forecastEntries}
-                          maxValue={yAxisMax}
-                          onAdjust={handleMedianAdjust}
-                          height={chartHeight}
-                          showIntervals={false}
-                          zoomedView={zoomedView}
-                        />
+                        <ForecastleChartCanvas {...sharedChartProps} showIntervals={false} />
                       </Box>
                       <Text size="sm" c="dimmed">
                         Drag the handles to set your median forecast for each week ahead.

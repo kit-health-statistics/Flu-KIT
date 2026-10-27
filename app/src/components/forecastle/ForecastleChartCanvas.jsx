@@ -13,6 +13,7 @@ import {
   ScatterController,
   Tooltip,
 } from 'chart.js';
+import { getRelativePosition } from 'chart.js/helpers';
 import { Chart } from 'react-chartjs-2';
 import { CHART_CONFIG, FORECASTLE_CONFIG } from '../../config';
 
@@ -43,16 +44,25 @@ const CURRENT_SEASON_LAST_WEEK = 52;
 const CONTINUOUS_WEEK_OFFSET = CURRENT_SEASON_LAST_WEEK; // 52
 const CONTINUOUS_SEASON_LAST_WEEK = 39 + CONTINUOUS_WEEK_OFFSET; // 91
 
+// Last week shown in the "whole season" view (continuous week 72 = calendar week 20).
+const FULL_VIEW_LAST_WEEK = 72;
+
 const COLORS = {
   interval80: CHART_CONFIG.forecastleColors?.interval80 || '#dc143c',
   median: '#000000',
   handleMedian: '#dc143c',
   handleOutline: '#000000',
-  previousSeason: '#808080',
-  twoBeforeSeason: '#00008B',
-  threeBeforeSeason: '#06402B',
   scoringForecast: '#dc143c',
   white: '#ffffff',
+};
+
+// Styles for the past-season overlays. Colors come from a colour-blind-friendly
+// palette (and avoid the red used for the forecast); each season also gets its
+// own dash pattern, so they stay distinguishable even in grayscale.
+const PAST_SEASON_STYLES = {
+  previous: { color: '#808080', dash: [6, 4], width: 2 },
+  twoBefore: { color: '#0072B2', dash: [2, 3], width: 1.75 },
+  threeBefore: { color: '#E69F00', dash: [10, 3, 2, 3], width: 1.75 },
 };
 
 // =============================================================================
@@ -154,12 +164,16 @@ const getLower80 = (entry) => entry?.lower80 ?? Math.max(0, getMedian(entry) - g
 // =============================================================================
 
 /**
- * Interactive forecast chart: plots current/previous season ground truth plus
+ * Interactive forecast chart: plots current/past season ground truth plus
  * a draggable median forecast line and 80% interval handles, or (in scoring
  * mode) the submitted forecast against other models and the eventual outcome.
  *
  * @param {{date: string, value: number}[]} groundTruthSeries - current season observed values
  * @param {{date: string, value: number}[]} previousSeasonSeries - previous season observed values, for overlay
+ * @param {{date: string, value: number}[]} twoBeforeSeasonSeries - season before the previous one (shown with showMoreSeasons)
+ * @param {{date: string, value: number}[]} threeBeforeSeasonSeries - season before that (shown with showMoreSeasons)
+ * @param {{current?: string, previous?: string, twoBefore?: string, threeBefore?: string}} [seasonLabels] - season names for the legend, e.g. "2025/26"
+ * @param {boolean} [showMoreSeasons=false] - also overlay the two older seasons
  * @param {string[]} horizonDates - "YYYY-WXX" weeks being forecast
  * @param {{median?: number, width80?: number, upper80?: number, lower80?: number}[]} entries - one forecast entry per horizon date
  * @param {number} maxValue - a hard floor for the y-axis max (e.g. from other charts, for visual consistency)
@@ -177,6 +191,8 @@ const ForecastleChartCanvasInner = ({
   previousSeasonSeries = [],
   twoBeforeSeasonSeries = [],
   threeBeforeSeasonSeries = [],
+  seasonLabels: seasonNames = null,
+  showMoreSeasons = false,
   horizonDates = [],
   entries = [],
   maxValue,
@@ -201,8 +217,8 @@ const ForecastleChartCanvasInner = ({
   const intervalHandleRadius = isTouch ? 9 : 6;
   const handleHitRadius = isTouch ? 28 : 15;
 
-  // Fixed y-axis max, computed once so the axis doesn't jump around as the
-  // user drags handles.
+  // Initial y-axis max, computed once so the axis doesn't jump around as the
+  // user drags handles. (The visible past seasons can raise it, see yAxisMax below.)
   const [fixedYMax] = useState(() => {
     const entryMax = Math.max(maxValue, ...entries.map((entry) => getMedian(entry) + getWidth80(entry)));
     return entryMax > 0 ? entryMax * 1.1 : 1;
@@ -212,14 +228,12 @@ const ForecastleChartCanvasInner = ({
   // ground-truth weeks through the end of the forecast horizon.
   const xAxisRange = useMemo(() => {
     const fullMinWeek = CURRENT_SEASON_FIRST_WEEK;
-    const fullMaxWeek = getMaxContinuousWeek(groundTruthSeries, horizonDates);
     // Leave room for the extra previous-season weeks (only if there is a previous season)
     const extraWeeks = previousSeasonSeries.length > 0 ? FORECASTLE_CONFIG.previousSeasonExtraWeeks : 0;
     const withExtra = (week) => Math.min(week + extraWeeks, CONTINUOUS_SEASON_LAST_WEEK);
 
     if (!zoomedView) {
-      return { min: fullMinWeek, max: 72 };
-      // Season ends at Week 20
+      return { min: fullMinWeek, max: FULL_VIEW_LAST_WEEK };
     }
 
     const recentGroundTruth = groundTruthSeries.slice(-5);
@@ -229,7 +243,7 @@ const ForecastleChartCanvasInner = ({
       : null;
 
     return { min: firstRecentWeek ?? fullMinWeek, max: withExtra(maxRecentWeek) };
-  }, [groundTruthSeries, previousSeasonSeries, twoBeforeSeasonSeries, threeBeforeSeasonSeries, horizonDates, zoomedView]);
+  }, [groundTruthSeries, previousSeasonSeries, horizonDates, zoomedView]);
 
   const seasonLabels = useMemo(() => buildSeasonLabels(), []);
 
@@ -266,6 +280,73 @@ const ForecastleChartCanvasInner = ({
     () => alignPointsToLabels(threeBeforeSeasonByWeek, seasonLabels),
     [threeBeforeSeasonByWeek, seasonLabels],
   );
+
+  // Past-season overlays, drawn oldest first so the newer seasons (and the current
+  // season) end up on top. The legend shows them in the reverse order (newest first).
+  const pastSeasonLayers = useMemo(
+    () => [
+      {
+        key: 'threeBefore',
+        label: seasonNames?.threeBefore ?? 'Three Seasons Ago',
+        series: threeBeforeSeasonSeries,
+        dataset: threeBeforeSeasonDataset,
+        visible: showMoreSeasons,
+        markers: false,
+      },
+      {
+        key: 'twoBefore',
+        label: seasonNames?.twoBefore ?? 'Two Seasons Ago',
+        series: twoBeforeSeasonSeries,
+        dataset: twoBeforeSeasonDataset,
+        visible: showMoreSeasons,
+        markers: false,
+      },
+      {
+        key: 'previous',
+        label: seasonNames?.previous ?? 'Previous Season',
+        series: previousSeasonSeries,
+        dataset: previousSeasonDataset,
+        visible: true,
+        // With only one past season there is no clutter, so keep the markers
+        markers: !showMoreSeasons,
+      },
+    ],
+    [
+      seasonNames,
+      showMoreSeasons,
+      threeBeforeSeasonSeries,
+      threeBeforeSeasonDataset,
+      twoBeforeSeasonSeries,
+      twoBeforeSeasonDataset,
+      previousSeasonSeries,
+      previousSeasonDataset,
+    ],
+  );
+
+  // y-axis max: the initial value, raised if a visible season (within the visible
+  // x-range) would otherwise be cut off. Dragging handles never changes this.
+  const yAxisMax = useMemo(() => {
+    const visiblePoints = [
+      ...currentSeasonByWeek,
+      ...previousSeasonByWeek,
+      ...(showMoreSeasons ? [...twoBeforeSeasonByWeek, ...threeBeforeSeasonByWeek] : []),
+    ];
+    let seasonMax = 0;
+    visiblePoints.forEach((point) => {
+      if (Number.isFinite(point.y) && point.x >= xAxisRange.min && point.x <= xAxisRange.max) {
+        seasonMax = Math.max(seasonMax, point.y);
+      }
+    });
+    return Math.max(fixedYMax, seasonMax * 1.1);
+  }, [
+    fixedYMax,
+    xAxisRange,
+    showMoreSeasons,
+    currentSeasonByWeek,
+    previousSeasonByWeek,
+    twoBeforeSeasonByWeek,
+    threeBeforeSeasonByWeek,
+  ]);
 
   // The last observed point ("present"): the 80% band starts here, like the median line.
   const presentPoint = useMemo(() => {
@@ -355,6 +436,27 @@ const ForecastleChartCanvasInner = ({
       return null;
     };
 
+    // Looks at everything under the pointer and returns the closest *handle*. Season
+    // lines are also hit-testable (for tooltips), so a plain "nearest element"
+    // lookup could pick a season point sitting next to a handle and block the drag.
+    const findHandleAtEvent = (event) => {
+      const elements = chart.getElementsAtEventForMode(event, 'point', { intersect: true }, false);
+      if (!elements?.length) return null;
+      const position = getRelativePosition(event, chart);
+      let bestMeta = null;
+      let bestDistance = Infinity;
+      elements.forEach((element) => {
+        const meta = getHandleMeta(element);
+        if (!meta) return;
+        const distance = Math.hypot(element.element.x - position.x, element.element.y - position.y);
+        if (distance < bestDistance) {
+          bestMeta = meta;
+          bestDistance = distance;
+        }
+      });
+      return bestMeta;
+    };
+
     let animationFrame = null;
 
     const pointerMove = (event) => {
@@ -386,8 +488,7 @@ const ForecastleChartCanvasInner = ({
     };
 
     const pointerDown = (event) => {
-      const elements = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false);
-      const meta = elements?.length ? getHandleMeta(elements[0]) : null;
+      const meta = findHandleAtEvent(event);
       if (!meta) {
         setDragState(null);
         return;
@@ -400,8 +501,7 @@ const ForecastleChartCanvasInner = ({
     // On touch screens the page must still scroll when the finger starts on the chart,
     // except when it starts on a handle (that gesture is a drag).
     const touchStart = (event) => {
-      const hit = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false);
-      if (hit?.length && getHandleMeta(hit[0])) event.preventDefault();
+      if (findHandleAtEvent(event)) event.preventDefault();
     };
 
     canvas.addEventListener('pointerdown', pointerDown);
@@ -466,82 +566,51 @@ const ForecastleChartCanvasInner = ({
   const chartData = useMemo(() => {
     const datasets = [];
 
+    // Past seasons first (oldest at the bottom), then the current season on top of them.
+    pastSeasonLayers
+      .filter((layer) => layer.visible && layer.series.length > 0)
+      .forEach((layer) => {
+        const style = PAST_SEASON_STYLES[layer.key];
+        datasets.push({
+          type: 'line',
+          label: layer.label,
+          isSeason: true,
+          data: layer.dataset,
+          parsing: false,
+          tension: 0,
+          spanGaps: true,
+          borderColor: style.color,
+          backgroundColor: style.color,
+          borderWidth: style.width,
+          borderDash: style.dash,
+          // No markers when several seasons are shown (less clutter); a small hit
+          // radius keeps the tooltips working.
+          pointRadius: layer.markers ? 3 : 0,
+          pointHoverRadius: 5,
+          pointHitRadius: 6,
+          pointBackgroundColor: style.color,
+          pointBorderColor: COLORS.white,
+          pointBorderWidth: 1,
+        });
+      });
+
     datasets.push({
       type: 'line',
-      label: 'Current Season',
+      label: `${seasonNames?.current ?? 'Current Season'}${seasonNames?.current ? ' (current)' : ''}`,
+      isSeason: true,
       data: currentSeasonDataset,
       parsing: false,
       tension: 0,
       spanGaps: true,
       borderColor: COLORS.median,
       backgroundColor: COLORS.median,
-      borderWidth: 2,
+      borderWidth: 2.5,
       pointRadius: 4,
       pointHoverRadius: 6,
       pointBackgroundColor: COLORS.median,
       pointBorderColor: COLORS.white,
       pointBorderWidth: 1,
     });
-
-    if (previousSeasonDataset.length > 0) {
-      datasets.push({
-        type: 'line',
-        label: 'Previous Season',
-        data: previousSeasonDataset,
-        parsing: false,
-        tension: 0,
-        spanGaps: true,
-        borderColor: COLORS.previousSeason,
-        backgroundColor: COLORS.previousSeason,
-        borderWidth: 1.5,
-        borderDash: [5, 5],
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        pointBackgroundColor: COLORS.previousSeason,
-        pointBorderColor: COLORS.white,
-        pointBorderWidth: 1,
-      });
-    }
-
-    if (twoBeforeSeasonDataset.length > 0) {
-      datasets.push({
-        type: 'line',
-        label: 'Two Years Ago',
-        data: twoBeforeSeasonDataset,
-        parsing: false,
-        tension: 0,
-        spanGaps: true,
-        borderColor: COLORS.twoBeforeSeason,
-        backgroundColor: COLORS.twoBeforeSeason,
-        borderWidth: 1.5,
-        borderDash: [5, 5],
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        pointBackgroundColor: COLORS.twoBeforeSeason,
-        pointBorderColor: COLORS.white,
-        pointBorderWidth: 1,
-      });
-    }
-
-    if (threeBeforeSeasonDataset.length > 0) {
-      datasets.push({
-        type: 'line',
-        label: 'Two Years Ago',
-        data: threeBeforeSeasonDataset,
-        parsing: false,
-        tension: 0,
-        spanGaps: true,
-        borderColor: COLORS.threeBeforeSeason,
-        backgroundColor: COLORS.threeBeforeSeason,
-        borderWidth: 1.5,
-        borderDash: [5, 5],
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        pointBackgroundColor: COLORS.threeBeforeSeason,
-        pointBorderColor: COLORS.white,
-        pointBorderWidth: 1,
-      });
-    }
 
     if (showIntervals) {
       // The invisible "lower" line establishes the bottom edge that the
@@ -666,10 +735,9 @@ const ForecastleChartCanvasInner = ({
 
     return { datasets, labels: seasonLabels };
   }, [
+    pastSeasonLayers,
+    seasonNames,
     currentSeasonDataset,
-    previousSeasonDataset,
-    twoBeforeSeasonDataset,
-    threeBeforeSeasonDataset,
     medianHandles,
     intervalHandles,
     interval80Upper,
@@ -695,10 +763,20 @@ const ForecastleChartCanvasInner = ({
       },
       plugins: {
         legend: {
-          display: showScoring,
+          display: true,
           position: 'bottom',
+          // Datasets are ordered oldest season first (drawing order); the legend lists
+          // the seasons newest first. (Not reversed in scoring mode.)
+          reverse: !showScoring,
           labels: {
-            filter: (legendItem) => !legendItem.text.includes('lower') && !legendItem.text.includes('Handles'),
+            // Normal mode: one entry per season shown (the labels are the season years).
+            // Scoring mode: everything except the helper datasets.
+            filter: (legendItem, data) => {
+              if (showScoring) {
+                return !legendItem.text.includes('lower') && !legendItem.text.includes('Handles');
+              }
+              return Boolean(data.datasets[legendItem.datasetIndex]?.isSeason);
+            },
             usePointStyle: true,
             padding: 12,
             font: { size: 11 },
@@ -713,7 +791,7 @@ const ForecastleChartCanvasInner = ({
             label: (context) => {
               const datasetLabel = context.dataset.label || '';
 
-              if (datasetLabel === 'Current Season' || datasetLabel === 'Previous Season' || datasetLabel === 'Two Years Ago' || datasetLabel === 'Three Years Ago') {
+              if (context.dataset.isSeason) {
                 return `${datasetLabel}: ${context.parsed.y?.toLocaleString('en-US') ?? '—'}`;
               }
               if (datasetLabel.includes('interval')) {
@@ -750,7 +828,7 @@ const ForecastleChartCanvasInner = ({
         },
         y: {
           beginAtZero: true,
-          max: fixedYMax,
+          max: yAxisMax,
           ticks: {
             color: '#000000',
             callback: (value) => Math.round(value).toLocaleString('en-US'),
@@ -762,7 +840,7 @@ const ForecastleChartCanvasInner = ({
         padding: { right: 12, left: 12 },
       },
     }),
-    [fixedYMax, showScoring, xAxisRange, zoomedView],
+    [yAxisMax, showScoring, xAxisRange, zoomedView],
   );
 
   return (
