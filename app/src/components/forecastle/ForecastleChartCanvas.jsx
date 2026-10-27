@@ -214,7 +214,7 @@ const ForecastleChartCanvasInner = ({
     const withExtra = (week) => Math.min(week + extraWeeks, CONTINUOUS_SEASON_LAST_WEEK);
 
     if (!zoomedView) {
-      return { min: fullMinWeek, max: withExtra(fullMaxWeek) };
+      return { min: fullMinWeek, max: previousSeasonSeries };
     }
 
     const recentGroundTruth = groundTruthSeries.slice(-5);

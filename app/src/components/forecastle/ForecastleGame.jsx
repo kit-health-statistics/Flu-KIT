@@ -528,7 +528,7 @@ const ForecastleGame = () => {
                       <Group justify="space-between">
                         <Title order={5}>Interactive Chart</Title>
                         <Switch
-                          label="Show More History"
+                          label="Show Whole Season"
                           checked={!zoomedView}
                           onChange={(event) => setZoomedView(!event.currentTarget.checked)}
                           color="red"
