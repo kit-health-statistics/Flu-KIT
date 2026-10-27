@@ -22,6 +22,7 @@ import {
   ActionIcon,
   Tooltip,
 } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
 import {
   IconAlertTriangle,
   IconTarget,
@@ -66,9 +67,6 @@ const getWeekDateRange = (weekStr) => {
   monday.setDate(mondayOfWeek1.getDate() + (weekNum - 1) * 7);
   const sunday = new Date(monday);
   sunday.setDate(monday.getDate() + 6);
-  const options = { year: 'numeric', month: 'short', day: 'numeric' };
-  const mondayStr = monday.toLocaleDateString('en-US', options);
-  const sundayStr = sunday.toLocaleDateString('en-US', options);
   const mondayMonth = monday.toLocaleDateString('en-US', { month: 'short' });
   const sundayMonth = sunday.toLocaleDateString('en-US', { month: 'short' });
   if (mondayMonth === sundayMonth) {
@@ -113,6 +111,7 @@ const getWeekNumber = (weekStr) => {
 const ForecastleGame = () => {
   const [searchParams] = useSearchParams();
   const playDate = searchParams.get('play_date') || null;
+  const isMobile = useMediaQuery('(max-width: 48em)');
   const [scenario, setScenario] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -206,19 +205,19 @@ const ForecastleGame = () => {
 
         setScenario(scenario);
 
-// ← add this block
-const horizonDates = scenario.horizons.map((h) => addWeeksToDate(scenario.forecastDate, h));
-const id = buildGameId({
-  challengeDate: scenario.challengeDate,
-  forecastDate: scenario.forecastDate,
-  dataset: scenario.dataset.key,
-  location: scenario.location.name,
-  target: scenario.dataset.targetKey,
-});
-const currentGroundTruth = extractGroundTruthForHorizons(scenario.fullGroundTruthSeries, horizonDates);
-const { canSubmit } = canSubmitForecast(id, currentGroundTruth);
-setAlreadySubmitted(!canSubmit);
-setPreviousGame(previousGame);
+        const horizonDates = scenario.horizons.map((h) => addWeeksToDate(scenario.forecastDate, h));
+        const id = buildGameId({
+          challengeDate: scenario.challengeDate,
+          forecastDate: scenario.forecastDate,
+          dataset: scenario.dataset.key,
+          location: scenario.location.name,
+          target: scenario.dataset.targetKey,
+        });
+        const currentGroundTruth = extractGroundTruthForHorizons(scenario.fullGroundTruthSeries, horizonDates);
+        // Use the stored game returned by canSubmitForecast, not the (still null) state variable
+        const { canSubmit, previousGame: storedGame } = canSubmitForecast(id, currentGroundTruth);
+        setAlreadySubmitted(!canSubmit);
+        setPreviousGame(storedGame);
       } catch (err) {
         console.error('Error loading data:', err);
         setError(err);
@@ -274,56 +273,60 @@ setPreviousGame(previousGame);
     }));
 
     setSubmittedPayload({ submittedAt: new Date().toISOString(), payload });
-    setInputMode('thankYou');
 
     try {
-  const horizonDates = scenario.horizons.map((horizon) => addWeeksToDate(scenario.forecastDate, horizon));
-  const id = buildGameId({
-    challengeDate: scenario.challengeDate,
-    forecastDate: scenario.forecastDate,
-    dataset: scenario.dataset.key,
-    location: scenario.location.name,
-    target: scenario.dataset.targetKey,
-  });
-  saveForecastleGame({
-    challengeDate: scenario.challengeDate,
-    forecastDate: scenario.forecastDate,
-    dataset: scenario.dataset.key,
-    location: scenario.location.name,
-    target: scenario.dataset.targetKey,
-    userForecasts: forecastEntries,
-    groundTruth: extractGroundTruthForHorizons(
-      scenario.fullGroundTruthSeries,
-      horizonDates
-    ),
-    horizonDates,
-  });
-  setSaveError(null);
-  setPreviousGame(getForecastleGame(id));
-  setAlreadySubmitted(true);
-  setIsEditing(false);
-} catch (error) {
+      const horizonDates = scenario.horizons.map((horizon) => addWeeksToDate(scenario.forecastDate, horizon));
+      const id = buildGameId({
+        challengeDate: scenario.challengeDate,
+        forecastDate: scenario.forecastDate,
+        dataset: scenario.dataset.key,
+        location: scenario.location.name,
+        target: scenario.dataset.targetKey,
+      });
+      const saved = saveForecastleGame({
+        challengeDate: scenario.challengeDate,
+        forecastDate: scenario.forecastDate,
+        dataset: scenario.dataset.key,
+        location: scenario.location.name,
+        target: scenario.dataset.targetKey,
+        userForecasts: forecastEntries,
+        groundTruth: extractGroundTruthForHorizons(
+          scenario.fullGroundTruthSeries,
+          horizonDates
+        ),
+        horizonDates,
+      });
+      if (!saved) {
+        throw new Error('Could not save your forecast in this browser.');
+      }
+      setSaveError(null);
+      setPreviousGame(getForecastleGame(id));
+      setAlreadySubmitted(true);
+      setIsEditing(false);
+      setInputMode('thankYou');
+    } catch (error) {
       console.error('Failed to save game:', error);
       setSaveError(error.message || 'Failed to save game to storage');
     }
   };
 
   const handleEditForecast = () => {
-  if (previousGame && previousGame.userForecasts) {
-    setForecastEntries(previousGame.userForecasts.map((f) => ({
-      horizon: f.horizon,
-      median: f.median,
-      lower80: f.lower80,
-      upper80: f.upper80,
-      width80: f.width80,
-    })));
-  }
-  setIsEditing(true);
-  setInputMode('median');
-  setSubmittedPayload(null);
-  setSubmissionErrors({});
-  setSaveError(null);
-};
+    if (previousGame && previousGame.userForecasts) {
+      setForecastEntries(previousGame.userForecasts.map((f) => ({
+        horizon: f.horizon,
+        median: f.median,
+        // Games saved by older versions stored the 80% bounds as lower95/upper95
+        lower80: f.lower80 ?? f.lower95,
+        upper80: f.upper80 ?? f.upper95,
+        width80: f.width80,
+      })));
+    }
+    setIsEditing(true);
+    setInputMode('median');
+    setSubmittedPayload(null);
+    setSubmissionErrors({});
+    setSaveError(null);
+  };
 
   const handleResetMedians = () => {
     if (!scenario) return;
@@ -387,6 +390,7 @@ setPreviousGame(previousGame);
     );
     const yAxisMax = Math.max(baseMax, userMaxCandidate * 1.1 || 0, latestObservationValue, 1);
     const horizonDates = scenario.horizons.map((horizon) => addWeeksToDate(scenario.forecastDate, horizon));
+    const chartHeight = isMobile ? 300 : 380;
 
     const handleMedianAdjust = (index, field, value) => {
       setForecastEntries((prevEntries) =>
@@ -421,12 +425,12 @@ setPreviousGame(previousGame);
 
     return (
       <Stack gap="lg">
-        <Paper shadow="sm" p="lg" radius="md" withBorder>
+        <Paper shadow="sm" p={{ base: 'sm', sm: 'lg' }} radius="md" withBorder>
           <Stack gap="md">
             <Group justify="space-between" wrap="wrap" align="center">
               <Group gap="sm">
                 <div>
-                  <Title order={2}>Weekly Incidence Forecast</Title>
+                  <Title order={2} fz={{ base: 20, sm: 28 }}>Weekly Incidence Forecast</Title>
                   <Text size="sm" c="dimmed" fw={500}>
                     📅 {getWeekDateRange(scenario.challengeDate)}
                   </Text>
@@ -470,185 +474,188 @@ setPreviousGame(previousGame);
                   else if (step === 1) setInputMode('intervals');
                 }}
                 allowNextStepsSelect={false}
-                size="sm"
+                size={isMobile ? 'xs' : 'sm'}
                 style={{ flex: 1 }}
               >
                 <Stepper.Step
                   label="Median"
-                  description="Point forecasts"
+                  description={isMobile ? undefined : 'Point forecasts'}
                   completedIcon={<IconCheck size={16} />}
                 />
                 <Stepper.Step
                   label="80% Interval"
-                  description="Uncertainty"
+                  description={isMobile ? undefined : 'Uncertainty'}
                   completedIcon={<IconCheck size={16} />}
                 />
               </Stepper>
             </Group>
 
+            {saveError && (
+              <Alert icon={<IconAlertTriangle size={16} />} title="Forecast not saved" color="red">
+                {saveError}
+              </Alert>
+            )}
+
             {inputMode === 'thankYou' && (
-  <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: '2rem' }}>
-    <Title order={3}>Thank You for Your Participation! 🎉</Title>
-    <Text size="lg" c="dimmed">
-      Your forecast has been submitted.
-    </Text>
-    <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
-      Edit Your Forecast
-    </Button>
-  </Stack>
-)}
+              <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: isMobile ? '1rem' : '2rem' }}>
+                <Title order={3}>Thank You for Your Participation! 🎉</Title>
+                <Text size="lg" c="dimmed">
+                  Your forecast has been submitted.
+                </Text>
+                <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
+                  Edit Your Forecast
+                </Button>
+              </Stack>
+            )}
 
-	    {alreadySubmitted && inputMode !== 'thankYou' && !isEditing && (
-  <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: '2rem' }}>
-    <Title order={3}>You've already forecasted this one</Title>
-    <Text size="sm" c="dimmed">
-      The underlying data hasn't changed since your last submission. You can still edit your forecast below.
-    </Text>
-    <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
-      Edit Your Forecast
-    </Button>
-  </Stack>
-)}
+            {alreadySubmitted && inputMode !== 'thankYou' && !isEditing && (
+              <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: isMobile ? '1rem' : '2rem' }}>
+                <Title order={3}>You've already forecasted this one</Title>
+                <Text size="sm" c="dimmed">
+                  The underlying data hasn't changed since your last submission. You can still edit your forecast below.
+                </Text>
+                <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
+                  Edit Your Forecast
+                </Button>
+              </Stack>
+            )}
 
-	    {inputMode !== 'thankYou' && (!alreadySubmitted || isEditing) && (
-            inputMode === 'intervals' ? (
-              <Grid gutter="lg">
-                <Grid.Col span={{ base: 12, lg: 7 }}>
-                  <Stack gap="md">
-                    <Group justify="space-between">
-                      <Title order={5}>Interactive Chart</Title>
-                      <Switch
-                        label="Show More History"
-                        checked={!zoomedView}
-                        onChange={(event) => setZoomedView(!event.currentTarget.checked)}
-                        color="red"
-                        size="md"
-                      />
-                    </Group>
-                    <Box style={{ width: '100%', height: 380 }}>
-                      <ForecastleChartCanvas
-                        groundTruthSeries={scenario.groundTruthSeries}
-                        previousSeasonSeries={scenario.previousSeasonSeries}
-                        horizonDates={horizonDates}
-                        entries={forecastEntries}
-                        maxValue={yAxisMax}
-                        onAdjust={handleMedianAdjust}
-                        height={380}
-                        showIntervals={true}
-                        zoomedView={zoomedView}
-                      />
-                    </Box>
-                    <Text size="sm" c="dimmed">
-                      Drag the handles to adjust interval bounds, or use the sliders for precise control.
-                    </Text>
-                  </Stack>
-                </Grid.Col>
-                <Grid.Col span={{ base: 12, lg: 5 }}>
-                  <Stack gap="md" h="100%">
-                    <Title order={5}>Uncertainty Intervals</Title>
-                    <ForecastleInputControls
-                      entries={forecastEntries}
-                      onChange={setForecastEntries}
-                      maxValue={yAxisMax}
-                      mode="intervals"
-                      horizonDates={horizonDates}
-                    />
-                    <Box mt="auto">
-                      <Stack gap="sm">
-                        <Button
-                          onClick={handleResetIntervals}
-                          variant="light"
-                          size="sm"
-                          fullWidth
-                          color="gray"
-                          leftSection={<IconRefresh size={16} />}
-                        >
-                          Reset to Default
-                        </Button>
-                        <Button
-                          onClick={() => {
-                            handleSubmit();
-                            setInputMode('thankYou');
-                          }}
+            {inputMode !== 'thankYou' && (!alreadySubmitted || isEditing) && (
+              inputMode === 'intervals' ? (
+                <Grid gutter="lg">
+                  <Grid.Col span={{ base: 12, lg: 7 }}>
+                    <Stack gap="md">
+                      <Group justify="space-between">
+                        <Title order={5}>Interactive Chart</Title>
+                        <Switch
+                          label="Show More History"
+                          checked={!zoomedView}
+                          onChange={(event) => setZoomedView(!event.currentTarget.checked)}
+                          color="red"
                           size="md"
-                          fullWidth
-                          disabled={inputMode === 'scoring'}
-                        >
-                          Submit & Thank You
-                        </Button>
-                      </Stack>
-                    </Box>
-                  </Stack>
-                </Grid.Col>
-              </Grid>
-            ) : (
-              <Grid gutter="lg">
-                <Grid.Col span={{ base: 12, lg: 7 }}>
-                  <Stack gap="md">
-                    <Group justify="space-between">
-                      <Title order={5}>Interactive Chart</Title>
-                      <Switch
-                        label="Show More History"
-                        checked={!zoomedView}
-                        onChange={(event) => setZoomedView(!event.currentTarget.checked)}
-                        color="red"
-                        size="md"
-                      />
-                    </Group>
-                    <Box style={{ width: '100%', height: 380 }}>
-                      <ForecastleChartCanvas
-                        groundTruthSeries={scenario.groundTruthSeries}
-                        previousSeasonSeries={scenario.previousSeasonSeries}
-                        horizonDates={horizonDates}
+                        />
+                      </Group>
+                      <Box style={{ width: '100%', height: chartHeight }}>
+                        <ForecastleChartCanvas
+                          groundTruthSeries={scenario.groundTruthSeries}
+                          previousSeasonSeries={scenario.previousSeasonSeries}
+                          horizonDates={horizonDates}
+                          entries={forecastEntries}
+                          maxValue={yAxisMax}
+                          onAdjust={handleMedianAdjust}
+                          height={chartHeight}
+                          showIntervals={true}
+                          zoomedView={zoomedView}
+                        />
+                      </Box>
+                      <Text size="sm" c="dimmed">
+                        Drag the handles to adjust interval bounds, or use the sliders for precise control.
+                      </Text>
+                    </Stack>
+                  </Grid.Col>
+                  <Grid.Col span={{ base: 12, lg: 5 }}>
+                    <Stack gap="md" h="100%">
+                      <Title order={5}>Uncertainty Intervals</Title>
+                      <ForecastleInputControls
                         entries={forecastEntries}
+                        onChange={setForecastEntries}
                         maxValue={yAxisMax}
-                        onAdjust={handleMedianAdjust}
-                        height={380}
-                        showIntervals={false}
-                        zoomedView={zoomedView}
+                        mode="intervals"
+                        horizonDates={horizonDates}
                       />
-                    </Box>
-                    <Text size="sm" c="dimmed">
-                      Drag the handles to set your median forecast for each week ahead.
-                    </Text>
-                  </Stack>
-                </Grid.Col>
-                <Grid.Col span={{ base: 12, lg: 5 }}>
-                  <Stack gap="md" h="100%">
-                    <Title order={5}>Median Forecasts</Title>
-                    <ForecastleInputControls
-                      entries={forecastEntries}
-                      onChange={setForecastEntries}
-                      maxValue={yAxisMax}
-                      mode="median"
-                      horizonDates={horizonDates}
-                    />
-                    <Box mt="auto">
-                      <Stack gap="sm">
-                        <Button
-                          onClick={handleResetMedians}
-                          variant="light"
-                          size="sm"
-                          fullWidth
-                          color="gray"
-                          leftSection={<IconRefresh size={16} />}
-                        >
-                          Reset to Default
-                        </Button>
-                        <Button
-                          onClick={() => setInputMode('intervals')}
+                      <Box mt="auto">
+                        <Stack gap="sm">
+                          <Button
+                            onClick={handleResetIntervals}
+                            variant="light"
+                            size="sm"
+                            fullWidth
+                            color="gray"
+                            leftSection={<IconRefresh size={16} />}
+                          >
+                            Reset to Default
+                          </Button>
+                          <Button
+                            onClick={handleSubmit}
+                            size="md"
+                            fullWidth
+                            disabled={inputMode === 'scoring'}
+                          >
+                            Submit & Thank You
+                          </Button>
+                        </Stack>
+                      </Box>
+                    </Stack>
+                  </Grid.Col>
+                </Grid>
+              ) : (
+                <Grid gutter="lg">
+                  <Grid.Col span={{ base: 12, lg: 7 }}>
+                    <Stack gap="md">
+                      <Group justify="space-between">
+                        <Title order={5}>Interactive Chart</Title>
+                        <Switch
+                          label="Show More History"
+                          checked={!zoomedView}
+                          onChange={(event) => setZoomedView(!event.currentTarget.checked)}
+                          color="red"
                           size="md"
-                          fullWidth
-                          rightSection="→"
-                        >
-                          Next: Set 80% Interval
-                        </Button>
-                      </Stack>
-                    </Box>
-                  </Stack>
-                </Grid.Col>
-              </Grid>
-	      )
+                        />
+                      </Group>
+                      <Box style={{ width: '100%', height: chartHeight }}>
+                        <ForecastleChartCanvas
+                          groundTruthSeries={scenario.groundTruthSeries}
+                          previousSeasonSeries={scenario.previousSeasonSeries}
+                          horizonDates={horizonDates}
+                          entries={forecastEntries}
+                          maxValue={yAxisMax}
+                          onAdjust={handleMedianAdjust}
+                          height={chartHeight}
+                          showIntervals={false}
+                          zoomedView={zoomedView}
+                        />
+                      </Box>
+                      <Text size="sm" c="dimmed">
+                        Drag the handles to set your median forecast for each week ahead.
+                      </Text>
+                    </Stack>
+                  </Grid.Col>
+                  <Grid.Col span={{ base: 12, lg: 5 }}>
+                    <Stack gap="md" h="100%">
+                      <Title order={5}>Median Forecasts</Title>
+                      <ForecastleInputControls
+                        entries={forecastEntries}
+                        onChange={setForecastEntries}
+                        maxValue={yAxisMax}
+                        mode="median"
+                        horizonDates={horizonDates}
+                      />
+                      <Box mt="auto">
+                        <Stack gap="sm">
+                          <Button
+                            onClick={handleResetMedians}
+                            variant="light"
+                            size="sm"
+                            fullWidth
+                            color="gray"
+                            leftSection={<IconRefresh size={16} />}
+                          >
+                            Reset to Default
+                          </Button>
+                          <Button
+                            onClick={() => setInputMode('intervals')}
+                            size="md"
+                            fullWidth
+                            rightSection="→"
+                          >
+                            Next: Set 80% Interval
+                          </Button>
+                        </Stack>
+                      </Box>
+                    </Stack>
+                  </Grid.Col>
+                </Grid>
+              )
             )}
           </Stack>
         </Paper>
@@ -661,7 +668,7 @@ setPreviousGame(previousGame);
       <Helmet>
         <title>Flu@KIT</title>
       </Helmet>
-      <Container size="xl" py="xl" style={{ maxWidth: '1100px' }}>
+      <Container size="xl" px={{ base: 'xs', sm: 'md' }} py={{ base: 'md', sm: 'xl' }} style={{ maxWidth: '1100px' }}>
         {renderContent()}
       </Container>
     </>
