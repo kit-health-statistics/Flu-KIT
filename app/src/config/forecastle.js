@@ -57,6 +57,12 @@ export const FORECASTLE_CONFIG = {
   },
 
   /**
+   * Previous-season overlay
+   * Extra weeks of the previous season shown beyond the last forecast horizon
+   */
+  previousSeasonExtraWeeks: 1,
+
+  /**
    * Statistical confidence parameters
    * Z-scores for confidence interval calculations (Poisson distribution)
    */

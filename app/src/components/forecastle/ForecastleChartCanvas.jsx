@@ -14,7 +14,7 @@ import {
   Tooltip,
 } from 'chart.js';
 import { Chart } from 'react-chartjs-2';
-import { CHART_CONFIG } from '../../config';
+import { CHART_CONFIG, FORECASTLE_CONFIG } from '../../config';
 
 ChartJS.register(
   CategoryScale,
@@ -188,6 +188,15 @@ const ForecastleChartCanvasInner = ({
   const chartRef = useRef(null);
   const [dragState, setDragState] = useState(null);
 
+  // Touch screens need bigger handles and a larger hit area than a mouse pointer.
+  const isTouch = useMemo(
+    () => (typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches) ?? false,
+    [],
+  );
+  const medianHandleRadius = isTouch ? 11 : 8;
+  const intervalHandleRadius = isTouch ? 9 : 6;
+  const handleHitRadius = isTouch ? 28 : 15;
+
   // Fixed y-axis max, computed once so the axis doesn't jump around as the
   // user drags handles.
   const [fixedYMax] = useState(() => {
@@ -200,9 +209,12 @@ const ForecastleChartCanvasInner = ({
   const xAxisRange = useMemo(() => {
     const fullMinWeek = CURRENT_SEASON_FIRST_WEEK;
     const fullMaxWeek = getMaxContinuousWeek(groundTruthSeries, horizonDates);
+    // Leave room for the extra previous-season weeks (only if there is a previous season)
+    const extraWeeks = previousSeasonSeries.length > 0 ? FORECASTLE_CONFIG.previousSeasonExtraWeeks : 0;
+    const withExtra = (week) => Math.min(week + extraWeeks, CONTINUOUS_SEASON_LAST_WEEK);
 
     if (!zoomedView) {
-      return { min: fullMinWeek, max: fullMaxWeek };
+      return { min: fullMinWeek, max: withExtra(fullMaxWeek) };
     }
 
     const recentGroundTruth = groundTruthSeries.slice(-5);
@@ -211,8 +223,8 @@ const ForecastleChartCanvasInner = ({
       ? getContinuousWeekFromDate(recentGroundTruth[0].date)
       : null;
 
-    return { min: firstRecentWeek ?? fullMinWeek, max: maxRecentWeek };
-  }, [groundTruthSeries, horizonDates, zoomedView]);
+    return { min: firstRecentWeek ?? fullMinWeek, max: withExtra(maxRecentWeek) };
+  }, [groundTruthSeries, previousSeasonSeries, horizonDates, zoomedView]);
 
   const seasonLabels = useMemo(() => buildSeasonLabels(), []);
 
@@ -234,23 +246,30 @@ const ForecastleChartCanvasInner = ({
     [previousSeasonByWeek, seasonLabels],
   );
 
-  // 80% interval band endpoints, one point per horizon date.
-  const interval80Upper = useMemo(
-    () =>
-      horizonDates.map((date, idx) => ({
-        x: getContinuousWeekFromDate(date),
-        y: getUpper80(entries[idx]),
-      })),
-    [entries, horizonDates],
-  );
-  const interval80Lower = useMemo(
-    () =>
-      horizonDates.map((date, idx) => ({
-        x: getContinuousWeekFromDate(date),
-        y: getLower80(entries[idx]),
-      })),
-    [entries, horizonDates],
-  );
+  // The last observed point ("present"): the 80% band starts here, like the median line.
+  const presentPoint = useMemo(() => {
+    const last = groundTruthSeries[groundTruthSeries.length - 1];
+    if (!last) return null;
+    const x = getContinuousWeekFromDate(last.date);
+    return x === null ? null : { x, y: last.value };
+  }, [groundTruthSeries]);
+
+  // 80% interval band endpoints: the present point, then one point per horizon date.
+  const interval80Upper = useMemo(() => {
+    const points = horizonDates.map((date, idx) => ({
+      x: getContinuousWeekFromDate(date),
+      y: getUpper80(entries[idx]),
+    }));
+    return presentPoint ? [presentPoint, ...points] : points;
+  }, [entries, horizonDates, presentPoint]);
+
+  const interval80Lower = useMemo(() => {
+    const points = horizonDates.map((date, idx) => ({
+      x: getContinuousWeekFromDate(date),
+      y: getLower80(entries[idx]),
+    }));
+    return presentPoint ? [presentPoint, ...points] : points;
+  }, [entries, horizonDates, presentPoint]);
 
   // Median forecast line: starts at the last known ground-truth point (so it
   // connects visually) and continues through each horizon date.
@@ -276,9 +295,9 @@ const ForecastleChartCanvasInner = ({
         x: getContinuousWeekFromDate(date),
         y: getMedian(entries[idx]),
         meta: { index: idx, type: 'median' },
-        radius: 8,
+        radius: medianHandleRadius,
       })),
-    [entries, horizonDates],
+    [entries, horizonDates, medianHandleRadius],
   );
 
   // Draggable 80% interval handles (upper + lower per horizon date).
@@ -287,11 +306,11 @@ const ForecastleChartCanvasInner = ({
     return horizonDates.flatMap((date, idx) => {
       const continuousWeek = getContinuousWeekFromDate(date);
       return [
-        { x: continuousWeek, y: getUpper80(entries[idx]), meta: { index: idx, type: 'upper80' }, radius: 6 },
-        { x: continuousWeek, y: getLower80(entries[idx]), meta: { index: idx, type: 'lower80' }, radius: 6 },
+        { x: continuousWeek, y: getUpper80(entries[idx]), meta: { index: idx, type: 'upper80' }, radius: intervalHandleRadius },
+        { x: continuousWeek, y: getLower80(entries[idx]), meta: { index: idx, type: 'lower80' }, radius: intervalHandleRadius },
       ];
     });
-  }, [entries, horizonDates, showIntervals]);
+  }, [entries, horizonDates, showIntervals, intervalHandleRadius]);
 
   // --- Drag-to-adjust interaction -------------------------------------------------
   // Chart.js doesn't offer built-in draggable points, so pointer events are
@@ -357,12 +376,21 @@ const ForecastleChartCanvasInner = ({
       setDragState(meta);
     };
 
+    // On touch screens the page must still scroll when the finger starts on the chart,
+    // except when it starts on a handle (that gesture is a drag).
+    const touchStart = (event) => {
+      const hit = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false);
+      if (hit?.length && getHandleMeta(hit[0])) event.preventDefault();
+    };
+
     canvas.addEventListener('pointerdown', pointerDown);
+    canvas.addEventListener('touchstart', touchStart, { passive: false });
     window.addEventListener('pointermove', pointerMove);
     window.addEventListener('pointerup', pointerUp);
     window.addEventListener('pointercancel', pointerUp);
     return () => {
       canvas.removeEventListener('pointerdown', pointerDown);
+      canvas.removeEventListener('touchstart', touchStart);
       window.removeEventListener('pointermove', pointerMove);
       window.removeEventListener('pointerup', pointerUp);
       window.removeEventListener('pointercancel', pointerUp);
@@ -550,10 +578,10 @@ const ForecastleChartCanvasInner = ({
         pointBackgroundColor: COLORS.handleMedian,
         pointBorderColor: COLORS.handleOutline,
         pointBorderWidth: 2,
-        pointHoverRadius: 10,
-        pointRadius: 8,
+        pointHoverRadius: medianHandleRadius + 2,
+        pointRadius: medianHandleRadius,
         showLine: false,
-        hitRadius: 15,
+        hitRadius: handleHitRadius,
       });
 
       if (showIntervals && intervalHandles.length > 0) {
@@ -567,10 +595,10 @@ const ForecastleChartCanvasInner = ({
           pointBackgroundColor: 'rgba(220, 20, 60, 0.5)',
           pointBorderColor: COLORS.handleOutline,
           pointBorderWidth: 2,
-          pointHoverRadius: 8,
-          pointRadius: (context) => intervalHandles[context.dataIndex]?.radius ?? 6,
+          pointHoverRadius: intervalHandleRadius + 2,
+          pointRadius: (context) => intervalHandles[context.dataIndex]?.radius ?? intervalHandleRadius,
           showLine: false,
-          hitRadius: 15,
+          hitRadius: handleHitRadius,
         });
       }
     }
@@ -589,6 +617,9 @@ const ForecastleChartCanvasInner = ({
     showScoring,
     groundTruthForecastPoints,
     topModelForecasts,
+    medianHandleRadius,
+    intervalHandleRadius,
+    handleHitRadius,
   ]);
 
   const options = useMemo(
@@ -676,7 +707,7 @@ const ForecastleChartCanvasInner = ({
       style={{
         width: '100%',
         height,
-        touchAction: 'none',
+        touchAction: 'pan-y',
         userSelect: 'none',
         WebkitUserSelect: 'none',
         MozUserSelect: 'none',
