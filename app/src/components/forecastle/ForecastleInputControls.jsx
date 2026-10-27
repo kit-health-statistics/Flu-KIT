@@ -176,6 +176,7 @@ const ForecastleInputControls = ({
             ]}
           />
         </Stack>
+      </Stack>
     </Stack>
   );
 };
