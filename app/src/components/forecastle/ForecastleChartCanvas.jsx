@@ -49,6 +49,8 @@ const COLORS = {
   handleMedian: '#dc143c',
   handleOutline: '#000000',
   previousSeason: '#808080',
+  twoBeforeSeason: '#00008B',
+  threeBeforeSeason: '#06402B',
   scoringForecast: '#dc143c',
   white: '#ffffff',
 };
@@ -173,6 +175,8 @@ const getLower80 = (entry) => entry?.lower80 ?? Math.max(0, getMedian(entry) - g
 const ForecastleChartCanvasInner = ({
   groundTruthSeries = [],
   previousSeasonSeries = [],
+  twoBeforeSeasonSeries = [],
+  threeBeforeSeasonSeries = [],
   horizonDates = [],
   entries = [],
   maxValue,
@@ -214,7 +218,8 @@ const ForecastleChartCanvasInner = ({
     const withExtra = (week) => Math.min(week + extraWeeks, CONTINUOUS_SEASON_LAST_WEEK);
 
     if (!zoomedView) {
-      return { min: fullMinWeek, max: 91 };
+      return { min: fullMinWeek, max: 72 };
+      // Season ends at Week 20
     }
 
     const recentGroundTruth = groundTruthSeries.slice(-5);
@@ -224,7 +229,7 @@ const ForecastleChartCanvasInner = ({
       : null;
 
     return { min: firstRecentWeek ?? fullMinWeek, max: withExtra(maxRecentWeek) };
-  }, [groundTruthSeries, previousSeasonSeries, horizonDates, zoomedView]);
+  }, [groundTruthSeries, previousSeasonSeries, twoBeforeSeasonSeries, threeBeforeSeasonSeries, horizonDates, zoomedView]);
 
   const seasonLabels = useMemo(() => buildSeasonLabels(), []);
 
@@ -236,6 +241,14 @@ const ForecastleChartCanvasInner = ({
     () => mapDataToContinuousWeeks(previousSeasonSeries),
     [previousSeasonSeries],
   );
+  const twoBeforeSeasonByWeek = useMemo(
+    () => mapDataToContinuousWeeks(twoBeforeSeasonSeries),
+    [twoBeforeSeasonSeries],
+  );
+  const threeBeforeSeasonByWeek = useMemo(
+    () => mapDataToContinuousWeeks(threeBeforeSeasonSeries),
+    [threeBeforeSeasonSeries],
+  );
 
   const currentSeasonDataset = useMemo(
     () => alignPointsToLabels(currentSeasonByWeek, seasonLabels),
@@ -244,6 +257,14 @@ const ForecastleChartCanvasInner = ({
   const previousSeasonDataset = useMemo(
     () => alignPointsToLabels(previousSeasonByWeek, seasonLabels),
     [previousSeasonByWeek, seasonLabels],
+  );
+  const twoBeforeSeasonDataset = useMemo(
+    () => alignPointsToLabels(twoBeforeSeasonByWeek, seasonLabels),
+    [twoBeforeSeasonByWeek, seasonLabels],
+  );
+  const threeBeforeSeasonDataset = useMemo(
+    () => alignPointsToLabels(threeBeforeSeasonByWeek, seasonLabels),
+    [threeBeforeSeasonByWeek, seasonLabels],
   );
 
   // The last observed point ("present"): the 80% band starts here, like the median line.
@@ -482,6 +503,46 @@ const ForecastleChartCanvasInner = ({
       });
     }
 
+    if (twoBeforeSeasonDataset.length > 0) {
+      datasets.push({
+        type: 'line',
+        label: 'Two Years Ago',
+        data: twoBeforeSeasonDataset,
+        parsing: false,
+        tension: 0,
+        spanGaps: true,
+        borderColor: COLORS.twoBeforeSeason,
+        backgroundColor: COLORS.twoBeforeSeason,
+        borderWidth: 1.5,
+        borderDash: [5, 5],
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        pointBackgroundColor: COLORS.twoBeforeSeason,
+        pointBorderColor: COLORS.white,
+        pointBorderWidth: 1,
+      });
+    }
+
+    if (threeBeforeSeasonDataset.length > 0) {
+      datasets.push({
+        type: 'line',
+        label: 'Two Years Ago',
+        data: threeBeforeSeasonDataset,
+        parsing: false,
+        tension: 0,
+        spanGaps: true,
+        borderColor: COLORS.threeBeforeSeason,
+        backgroundColor: COLORS.threeBeforeSeason,
+        borderWidth: 1.5,
+        borderDash: [5, 5],
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        pointBackgroundColor: COLORS.threeBeforeSeason,
+        pointBorderColor: COLORS.white,
+        pointBorderWidth: 1,
+      });
+    }
+
     if (showIntervals) {
       // The invisible "lower" line establishes the bottom edge that the
       // "upper" line's `fill: '-1'` shades against, forming the band.
@@ -607,6 +668,8 @@ const ForecastleChartCanvasInner = ({
   }, [
     currentSeasonDataset,
     previousSeasonDataset,
+    twoBeforeSeasonDataset,
+    threeBeforeSeasonDataset,
     medianHandles,
     intervalHandles,
     interval80Upper,
@@ -650,7 +713,7 @@ const ForecastleChartCanvasInner = ({
             label: (context) => {
               const datasetLabel = context.dataset.label || '';
 
-              if (datasetLabel === 'Current Season' || datasetLabel === 'Previous Season') {
+              if (datasetLabel === 'Current Season' || datasetLabel === 'Previous Season' || datasetLabel === 'Two Years Ago' || datasetLabel === 'Three Years Ago') {
                 return `${datasetLabel}: ${context.parsed.y?.toLocaleString('en-US') ?? '—'}`;
               }
               if (datasetLabel.includes('interval')) {

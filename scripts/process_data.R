@@ -16,7 +16,7 @@ FILTER_REGION  <- "Sueden"
 
 LOCATION_NAME <- "Southern Germany"
 DATASET_NAME  <- "GrippeWeb ARE"
-N_SEASONS     <- 2   # the app uses the last season as current, the one before as previous
+N_SEASONS     <- 4   # the app uses the last season as current, the one before as previous
 
 REQUIRED_COLS <- c("Saison", "Erkrankung", "Altersgruppe", "Region", "Kalenderwoche", "Inzidenz")
 

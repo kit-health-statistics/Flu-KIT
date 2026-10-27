@@ -143,9 +143,13 @@ const ForecastleGame = () => {
         const uniqueSeasons = [...new Set(season)];
         const currentSeason = uniqueSeasons[uniqueSeasons.length - 1];
         const previousSeason = uniqueSeasons[uniqueSeasons.length - 2];
+	const twoBeforeSeason = uniqueSeasons[uniqueSeasons.length - 3];
+	const threeBeforeSeason = uniqueSeasons[uniqueSeasons.length - 4];
 
         console.log('Current season:', currentSeason);
         console.log('Previous season:', previousSeason);
+	console.log('Two years ago:', twoBeforeSeason);
+	console.log('Three years ago:', threeBeforeSeason);
 
         // Build current season series
         const currentSeasonSeries = dates.map((date, index) => ({
@@ -156,7 +160,7 @@ const ForecastleGame = () => {
 
         console.log('Current season series length:', currentSeasonSeries.length);
 
-        // ✅ Build previous season series (for grey/red dashed line in background)
+        // Build previous season series (for grey/red dashed line in background)
         let previousSeasonSeries = [];
         if (previousSeason) {
           previousSeasonSeries = dates.map((date, index) => ({
@@ -166,15 +170,42 @@ const ForecastleGame = () => {
           })).filter(item => item.season === previousSeason);
         }
 
-        console.log('Previous season series length:', previousSeasonSeries.length);
+	// Build season two years ago
+	let twoBeforeSeasonSeries = [];
+	if (twoBeforeSeason) {
+	  twoBeforeSeasonSeries = dates.map((date, index) => ({
+	    date,
+	    value: wk_inc[index],
+	    season: season[index],
+	  })).filter(item => item.season === twoBeforeSeason);
+	}
 
-        // Truncate previous season to horizon + 3 weeks (only if we have data)
+	// Build season three years ago
+	let threeBeforeSeasonSeries = [];
+	if (threeBeforeSeason) {
+	  threeBeforeSeasonSeries = dates.map((date, index) => ({
+	    date,
+	    value: wk_inc[index],
+	    season: season[index],
+	  })).filter(item => item.season === threeBeforeSeason);
+	}
+
+        console.log('Previous season series length:', previousSeasonSeries.length);
+	console.log('Two years ago series length:', twoBeforeSeasonSeries.length);
+	console.log('Three years ago series length:', threeBeforeSeasonSeries.length);
+
+
+        // Truncate previous seasons to horizon + 3 weeks (only if we have data)
         const forecastDateIndex = dates.indexOf(playDate || dates[dates.length - 1]);
         if (forecastDateIndex !== -1 && previousSeasonSeries.length > 0) {
           const horizonWeeks = 3;
           const endIndex = forecastDateIndex + horizonWeeks;
           previousSeasonSeries = previousSeasonSeries.slice(0, endIndex + 1);
+	  twoBeforeSeasonSeries = twoBeforeSeasonSeries.slice(0, endIndex + 1);
+	  threeBeforeSeasonSeries = threeBeforeSeasonSeries.slice(0, endIndex + 1);
           console.log('Truncated previous season series length:', previousSeasonSeries.length);
+	  console.log('Truncated two years ago series length:', twoBeforeSeasonSeries.length);
+	  console.log('Truncated three years ago series length:', threeBeforeSeasonSeries.length);
         }
 
         const lastGroundTruthDate = dates[dates.length - 1];
@@ -192,6 +223,8 @@ const ForecastleGame = () => {
           horizons: metadata.hubverse_keys?.horizon || [1, 2, 3, 4],
           groundTruthSeries: currentSeasonSeries,
           previousSeasonSeries,
+	  twoBeforeSeasonSeries,
+	  threeBeforeSeasonSeries,
           fullGroundTruthSeries: dates.map((date, index) => ({ date, value: wk_inc[index] })),
         };
 
@@ -200,6 +233,8 @@ const ForecastleGame = () => {
           forecastDate: scenario.forecastDate,
           groundTruthSeriesLength: scenario.groundTruthSeries.length,
           previousSeasonSeriesLength: scenario.previousSeasonSeries.length,
+	  twoBeforeSeasonSeriesLength: scenario.twoBeforeSeasonSeries.length,
+	  threeBeforeSeasonSeriesLength: scenario.threeBeforeSeasonSeries.length,
           horizons: scenario.horizons,
         });
 
@@ -379,6 +414,8 @@ const ForecastleGame = () => {
     console.log('Rendering chart with:', {
       groundTruthSeriesLength: scenario.groundTruthSeries.length,
       previousSeasonSeriesLength: scenario.previousSeasonSeries.length,
+      twoBeforeSeasonSeriesLength: scenario.twoBeforeSeasonSeries.length, 
+      threeBeforeSeasonSeriesLEngth: scenario.threeBeforeSeasonSeries.length,
       horizonDates: scenario.horizons.map(h => addWeeksToDate(scenario.forecastDate, h)),
     });
 
@@ -539,6 +576,8 @@ const ForecastleGame = () => {
                         <ForecastleChartCanvas
                           groundTruthSeries={scenario.groundTruthSeries}
                           previousSeasonSeries={scenario.previousSeasonSeries}
+			  twoBeforeSeasonSeries={scenario.twoBeforeSeasonSeries}
+			  threeBeforeSeasonSeries={scenario.threeBeforeSeasonSeries}
                           horizonDates={horizonDates}
                           entries={forecastEntries}
                           maxValue={yAxisMax}
@@ -606,6 +645,8 @@ const ForecastleGame = () => {
                         <ForecastleChartCanvas
                           groundTruthSeries={scenario.groundTruthSeries}
                           previousSeasonSeries={scenario.previousSeasonSeries}
+			  twoBeforeSeasonSeries={scenario.twoBeforeSeasonSeries}
+			  threeBeforeSeasonSeries={scenario.threeBeforeSeasonSeries}
                           horizonDates={horizonDates}
                           entries={forecastEntries}
                           maxValue={yAxisMax}
