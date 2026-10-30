@@ -13,23 +13,15 @@ import {
   Group,
   Loader,
   Paper,
+  Progress,
   Stack,
   Stepper,
   Switch,
   Text,
-  ThemeIcon,
   Title,
-  ActionIcon,
-  Tooltip,
 } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
-import {
-  IconAlertTriangle,
-  IconTarget,
-  IconCopy,
-  IconCheck,
-  IconRefresh,
-} from '@tabler/icons-react';
+import { IconAlertTriangle, IconCheck, IconRefresh } from '@tabler/icons-react';
 import { initialiseForecastInputs, convertToIntervals } from '../../utils/forecastleInputs';
 import { validateForecastSubmission } from '../../utils/forecastleValidation';
 import { FORECASTLE_CONFIG } from '../../config';
@@ -37,6 +29,10 @@ import { extractGroundTruthForHorizons } from '../../utils/forecastleScoring';
 import { saveForecastleGame, getForecastleGame, canSubmitForecast, buildGameId } from '../../utils/respilensStorage';
 import ForecastleChartCanvas from './ForecastleChartCanvas';
 import ForecastleInputControls from './ForecastleInputControls';
+
+// =============================================================================
+// Week / date helpers
+// =============================================================================
 
 // ✅ Helper: Get ISO week number (1-53) for a given Date
 const getISOWeek = (date) => {
@@ -100,159 +96,134 @@ const addWeeksToDate = (weekStr, weeks) => {
   return `${newYear}-W${newWeek.toString().padStart(2, '0')}`;
 };
 
-// ✅ Helper: Get week number from YYYY-WXX (for sorting or comparison)
-const getWeekNumber = (weekStr) => {
-  const match = weekStr.match(/^(\d{4})-W(\d{1,2})$/);
-  if (!match) return 0;
-  const [, year, week] = match;
-  return parseInt(year, 10) * 100 + parseInt(week, 10);
+// =============================================================================
+// Scenario building (one scenario per dataset in the data file)
+// =============================================================================
+
+/**
+ * Turns one dataset entry ({metadata, ground_truth}) of the data file into the
+ * scenario object used by a forecast round.
+ */
+const buildScenario = (dataset, playDate) => {
+  const { metadata, ground_truth } = dataset;
+  const { dates, wk_inc, season } = ground_truth;
+
+  // Extract seasons (the data is sorted chronologically, the last one is the current season)
+  const uniqueSeasons = [...new Set(season)];
+  const currentSeason = uniqueSeasons[uniqueSeasons.length - 1];
+  const previousSeason = uniqueSeasons[uniqueSeasons.length - 2];
+  const twoBeforeSeason = uniqueSeasons[uniqueSeasons.length - 3];
+  const threeBeforeSeason = uniqueSeasons[uniqueSeasons.length - 4];
+
+  // Builds the {date, value, season} series of one season (empty if the season doesn't exist)
+  const buildSeasonSeries = (seasonName) => {
+    if (!seasonName) return [];
+    return dates
+      .map((date, index) => ({ date, value: wk_inc[index], season: season[index] }))
+      .filter((item) => item.season === seasonName);
+  };
+
+  const currentSeasonSeries = buildSeasonSeries(currentSeason);
+  let previousSeasonSeries = buildSeasonSeries(previousSeason);
+  let twoBeforeSeasonSeries = buildSeasonSeries(twoBeforeSeason);
+  let threeBeforeSeasonSeries = buildSeasonSeries(threeBeforeSeason);
+
+  // Truncate previous seasons to horizon + 3 weeks (only if we have data)
+  const forecastDateIndex = dates.indexOf(playDate || dates[dates.length - 1]);
+  if (forecastDateIndex !== -1 && previousSeasonSeries.length > 0) {
+    const horizonWeeks = 3;
+    const endIndex = forecastDateIndex + horizonWeeks;
+    previousSeasonSeries = previousSeasonSeries.slice(0, endIndex + 1);
+    twoBeforeSeasonSeries = twoBeforeSeasonSeries.slice(0, endIndex + 1);
+    threeBeforeSeasonSeries = threeBeforeSeasonSeries.slice(0, endIndex + 1);
+  }
+
+  const datasetLabel = metadata.dataset?.[0] || 'default';
+  // `key` is unique per dataset (used for the stored game id); old files only have the dataset name
+  const datasetKey = metadata.key?.[0] || metadata.dataset?.[0] || 'default_dataset';
+
+  return {
+    key: datasetKey,
+    challengeDate: playDate || `${new Date().getFullYear()}-W${String(getISOWeek(new Date())).padStart(2, '0')}`,
+    forecastDate: dates[dates.length - 1],
+    dataset: {
+      key: datasetKey,
+      label: datasetLabel,
+      targetKey: metadata.hubverse_keys?.targets?.[0] || 'wk_inc',
+    },
+    location: {
+      name: metadata.location_name?.[0] || 'Unknown Location',
+    },
+    horizons: metadata.hubverse_keys?.horizon || [1, 2, 3, 4],
+    groundTruthSeries: currentSeasonSeries,
+    previousSeasonSeries,
+    twoBeforeSeasonSeries,
+    threeBeforeSeasonSeries,
+    // Season names (e.g. "2025/26") for the chart legend
+    seasons: {
+      current: currentSeason,
+      previous: previousSeason,
+      twoBefore: twoBeforeSeason,
+      threeBefore: threeBeforeSeason,
+    },
+    fullGroundTruthSeries: dates.map((date, index) => ({ date, value: wk_inc[index] })),
+  };
 };
 
-const ForecastleGame = () => {
-  const [searchParams] = useSearchParams();
-  const playDate = searchParams.get('play_date') || null;
-  const isMobile = useMediaQuery('(max-width: 48em)');
-  const [scenario, setScenario] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [forecastEntries, setForecastEntries] = useState([]);
-  const [submissionErrors, setSubmissionErrors] = useState({});
-  const [submittedPayload, setSubmittedPayload] = useState(null);
-  const [inputMode, setInputMode] = useState('median');
-  const [zoomedView, setZoomedView] = useState(true);
-  const [showMoreSeasons, setShowMoreSeasons] = useState(false);
-  const [saveError, setSaveError] = useState(null);
-  const [alreadySubmitted, setAlreadySubmitted] = useState(false);
-  const [previousGame, setPreviousGame] = useState(null);
-  const [isEditing, setIsEditing] = useState(false);
+// =============================================================================
+// One forecast round (median step -> interval step -> submit) for one scenario
+// =============================================================================
 
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        const response = await fetch(`${import.meta.env.BASE_URL}processed_data/your-data.json`);
-        if (!response.ok) {
-          throw new Error(`Failed to load data: ${response.status}`);
-        }
-        const rawData = await response.json();
-        const { metadata, ground_truth } = rawData;
-        const { dates, wk_inc, season } = ground_truth;
+const ForecastleRound = ({
+  scenario,
+  isLastRound,
+  onNext,
+  isMobile,
+  zoomedView,
+  setZoomedView,
+  showMoreSeasons,
+  setShowMoreSeasons,
+}) => {
+  const horizonDates = useMemo(
+    () => scenario.horizons.map((horizon) => addWeeksToDate(scenario.forecastDate, horizon)),
+    [scenario],
+  );
 
-        console.log('Raw data loaded:', { dates: dates?.length, wk_inc: wk_inc?.length, season: season?.length });
-
-        // Extract seasons (the data is sorted chronologically, the last one is the current season)
-        const uniqueSeasons = [...new Set(season)];
-        const currentSeason = uniqueSeasons[uniqueSeasons.length - 1];
-        const previousSeason = uniqueSeasons[uniqueSeasons.length - 2];
-        const twoBeforeSeason = uniqueSeasons[uniqueSeasons.length - 3];
-        const threeBeforeSeason = uniqueSeasons[uniqueSeasons.length - 4];
-
-        console.log('Seasons (current, previous, two before, three before):',
-          currentSeason, previousSeason, twoBeforeSeason, threeBeforeSeason);
-
-        // Builds the {date, value, season} series of one season (empty if the season doesn't exist)
-        const buildSeasonSeries = (seasonName) => {
-          if (!seasonName) return [];
-          return dates
-            .map((date, index) => ({ date, value: wk_inc[index], season: season[index] }))
-            .filter((item) => item.season === seasonName);
-        };
-
-        const currentSeasonSeries = buildSeasonSeries(currentSeason);
-        let previousSeasonSeries = buildSeasonSeries(previousSeason);
-        let twoBeforeSeasonSeries = buildSeasonSeries(twoBeforeSeason);
-        let threeBeforeSeasonSeries = buildSeasonSeries(threeBeforeSeason);
-
-        console.log('Series lengths (current, previous, two before, three before):',
-          currentSeasonSeries.length,
-          previousSeasonSeries.length,
-          twoBeforeSeasonSeries.length,
-          threeBeforeSeasonSeries.length);
-
-        // Truncate previous seasons to horizon + 3 weeks (only if we have data)
-        const forecastDateIndex = dates.indexOf(playDate || dates[dates.length - 1]);
-        if (forecastDateIndex !== -1 && previousSeasonSeries.length > 0) {
-          const horizonWeeks = 3;
-          const endIndex = forecastDateIndex + horizonWeeks;
-          previousSeasonSeries = previousSeasonSeries.slice(0, endIndex + 1);
-          twoBeforeSeasonSeries = twoBeforeSeasonSeries.slice(0, endIndex + 1);
-          threeBeforeSeasonSeries = threeBeforeSeasonSeries.slice(0, endIndex + 1);
-        }
-
-        const lastGroundTruthDate = dates[dates.length - 1];
-        const scenario = {
-          challengeDate: playDate || `${new Date().getFullYear()}-W${String(getISOWeek(new Date())).padStart(2, '0')}`,
-          forecastDate: lastGroundTruthDate,
-          dataset: {
-            key: metadata.dataset?.[0] || 'default_dataset',
-            label: metadata.dataset?.[0] || 'default',
-            targetKey: metadata.hubverse_keys?.targets?.[0] || 'wk_inc',
-          },
-          location: {
-            name: metadata.location_name?.[0] || 'Unknown Location',
-          },
-          horizons: metadata.hubverse_keys?.horizon || [1, 2, 3, 4],
-          groundTruthSeries: currentSeasonSeries,
-          previousSeasonSeries,
-          twoBeforeSeasonSeries,
-          threeBeforeSeasonSeries,
-          // Season names (e.g. "2025/26") for the chart legend
-          seasons: {
-            current: currentSeason,
-            previous: previousSeason,
-            twoBefore: twoBeforeSeason,
-            threeBefore: threeBeforeSeason,
-          },
-          fullGroundTruthSeries: dates.map((date, index) => ({ date, value: wk_inc[index] })),
-        };
-
-        console.log('Scenario built:', {
-          challengeDate: scenario.challengeDate,
-          forecastDate: scenario.forecastDate,
-          groundTruthSeriesLength: scenario.groundTruthSeries.length,
-          previousSeasonSeriesLength: scenario.previousSeasonSeries.length,
-          twoBeforeSeasonSeriesLength: scenario.twoBeforeSeasonSeries.length,
-          threeBeforeSeasonSeriesLength: scenario.threeBeforeSeasonSeries.length,
-          horizons: scenario.horizons,
-        });
-
-        setScenario(scenario);
-
-        const horizonDates = scenario.horizons.map((h) => addWeeksToDate(scenario.forecastDate, h));
-        const id = buildGameId({
-          challengeDate: scenario.challengeDate,
-          forecastDate: scenario.forecastDate,
-          dataset: scenario.dataset.key,
-          location: scenario.location.name,
-          target: scenario.dataset.targetKey,
-        });
-        const currentGroundTruth = extractGroundTruthForHorizons(scenario.fullGroundTruthSeries, horizonDates);
-        // Use the stored game returned by canSubmitForecast, not the (still null) state variable
-        const { canSubmit, previousGame: storedGame } = canSubmitForecast(id, currentGroundTruth);
-        setAlreadySubmitted(!canSubmit);
-        setPreviousGame(storedGame);
-      } catch (err) {
-        console.error('Error loading data:', err);
-        setError(err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadData();
-  }, [playDate]);
+  const gameId = useMemo(
+    () =>
+      buildGameId({
+        challengeDate: scenario.challengeDate,
+        forecastDate: scenario.forecastDate,
+        dataset: scenario.dataset.key,
+        location: scenario.location.name,
+        target: scenario.dataset.targetKey,
+      }),
+    [scenario],
+  );
 
   const latestObservationValue = useMemo(() => {
-    const series = scenario?.groundTruthSeries;
+    const series = scenario.groundTruthSeries;
     if (!series || series.length === 0) return 0;
     const lastValue = series[series.length - 1]?.value;
     return Number.isFinite(lastValue) ? lastValue : 0;
-  }, [scenario?.groundTruthSeries]);
+  }, [scenario]);
 
-  useEffect(() => {
-    if (!scenario) return;
-    const initialInputs = initialiseForecastInputs(scenario?.horizons || [], latestObservationValue);
-    setForecastEntries(initialInputs);
-  }, [scenario, latestObservationValue]);
+  // Has this browser already forecasted this scenario (with unchanged data)?
+  const [storedState] = useState(() => {
+    const currentGroundTruth = extractGroundTruthForHorizons(scenario.fullGroundTruthSeries, horizonDates);
+    return canSubmitForecast(gameId, currentGroundTruth);
+  });
+
+  const [forecastEntries, setForecastEntries] = useState(() =>
+    initialiseForecastInputs(scenario.horizons || [], latestObservationValue),
+  );
+  const [submissionErrors, setSubmissionErrors] = useState({});
+  const [submittedPayload, setSubmittedPayload] = useState(null);
+  const [inputMode, setInputMode] = useState('median');
+  const [saveError, setSaveError] = useState(null);
+  const [alreadySubmitted, setAlreadySubmitted] = useState(!storedState.canSubmit);
+  const [previousGame, setPreviousGame] = useState(storedState.previousGame);
+  const [isEditing, setIsEditing] = useState(false);
 
   const handleSubmit = () => {
     if (!forecastEntries || forecastEntries.length === 0) {
@@ -287,14 +258,6 @@ const ForecastleGame = () => {
     setSubmittedPayload({ submittedAt: new Date().toISOString(), payload });
 
     try {
-      const horizonDates = scenario.horizons.map((horizon) => addWeeksToDate(scenario.forecastDate, horizon));
-      const id = buildGameId({
-        challengeDate: scenario.challengeDate,
-        forecastDate: scenario.forecastDate,
-        dataset: scenario.dataset.key,
-        location: scenario.location.name,
-        target: scenario.dataset.targetKey,
-      });
       const saved = saveForecastleGame({
         challengeDate: scenario.challengeDate,
         forecastDate: scenario.forecastDate,
@@ -302,17 +265,14 @@ const ForecastleGame = () => {
         location: scenario.location.name,
         target: scenario.dataset.targetKey,
         userForecasts: forecastEntries,
-        groundTruth: extractGroundTruthForHorizons(
-          scenario.fullGroundTruthSeries,
-          horizonDates
-        ),
+        groundTruth: extractGroundTruthForHorizons(scenario.fullGroundTruthSeries, horizonDates),
         horizonDates,
       });
       if (!saved) {
         throw new Error('Could not save your forecast in this browser.');
       }
       setSaveError(null);
-      setPreviousGame(getForecastleGame(id));
+      setPreviousGame(getForecastleGame(gameId));
       setAlreadySubmitted(true);
       setIsEditing(false);
       setInputMode('thankYou');
@@ -341,9 +301,7 @@ const ForecastleGame = () => {
   };
 
   const handleResetMedians = () => {
-    if (!scenario) return;
-    const initialInputs = initialiseForecastInputs(scenario?.horizons || [], latestObservationValue);
-    setForecastEntries(initialInputs);
+    setForecastEntries(initialiseForecastInputs(scenario.horizons || [], latestObservationValue));
     setSubmissionErrors({});
   };
 
@@ -360,6 +318,370 @@ const ForecastleGame = () => {
     });
     setForecastEntries(resetEntries);
     setSubmissionErrors({});
+  };
+
+  const latestValue = Number.isFinite(latestObservationValue) ? latestObservationValue : 0;
+  const baseMax = latestValue > 0 ? latestValue * 2 : 1;
+  const userMaxCandidate = Math.max(
+    ...forecastEntries.map((entry) => (entry.median ?? 0) + (entry.width80 ?? 0)),
+    0,
+  );
+  const yAxisMax = Math.max(baseMax, userMaxCandidate * 1.1 || 0, latestObservationValue, 1);
+  // The legend needs some extra room when four seasons are listed on a narrow screen
+  const chartHeight = isMobile ? (showMoreSeasons ? 340 : 300) : 380;
+
+  // "Show More Seasons" only makes sense if the data contains older seasons
+  const hasMoreSeasons =
+    scenario.twoBeforeSeasonSeries.length > 0 || scenario.threeBeforeSeasonSeries.length > 0;
+
+  const handleMedianAdjust = (index, field, value) => {
+    setForecastEntries((prevEntries) =>
+      prevEntries.map((entry, idx) => {
+        if (idx !== index) return entry;
+        const nextEntry = { ...entry };
+        if (field === 'median') {
+          const oldMedian = entry.median;
+          const newMedian = Math.max(0, value);
+          const medianShift = newMedian - oldMedian;
+          nextEntry.median = newMedian;
+          if (entry.lower80 !== undefined && entry.upper80 !== undefined) {
+            nextEntry.lower80 = Math.max(0, entry.lower80 + medianShift);
+            nextEntry.upper80 = entry.upper80 + medianShift;
+          }
+        } else if (field === 'interval80') {
+          const [lower, upper] = value;
+          nextEntry.lower80 = Math.max(0, lower);
+          nextEntry.upper80 = Math.max(lower, upper);
+          nextEntry.width80 = Math.max(nextEntry.upper80 - entry.median, entry.median - nextEntry.lower80);
+        } else {
+          nextEntry[field] = Math.max(0, value);
+        }
+        return nextEntry;
+      }),
+    );
+    setSubmissionErrors({});
+    if (submittedPayload) {
+      setSubmittedPayload(null);
+    }
+  };
+
+  // Title + the two chart switches (shared by the median and the interval view)
+  const chartHeader = (
+    <Group justify="space-between" align="center" wrap="wrap" gap="xs">
+      <Title order={5}>Interactive Chart</Title>
+      <Group gap="md" wrap="wrap">
+        <Switch
+          label="Show Whole Season"
+          checked={!zoomedView}
+          onChange={(event) => setZoomedView(!event.currentTarget.checked)}
+          color="red"
+          size={isMobile ? 'sm' : 'md'}
+        />
+        {hasMoreSeasons && (
+          <Switch
+            label="Show More Seasons"
+            checked={showMoreSeasons}
+            onChange={(event) => setShowMoreSeasons(event.currentTarget.checked)}
+            color="red"
+            size={isMobile ? 'sm' : 'md'}
+          />
+        )}
+      </Group>
+    </Group>
+  );
+
+  // Props that are identical for both chart views
+  const sharedChartProps = {
+    groundTruthSeries: scenario.groundTruthSeries,
+    previousSeasonSeries: scenario.previousSeasonSeries,
+    twoBeforeSeasonSeries: scenario.twoBeforeSeasonSeries,
+    threeBeforeSeasonSeries: scenario.threeBeforeSeasonSeries,
+    seasonLabels: scenario.seasons,
+    showMoreSeasons,
+    horizonDates,
+    entries: forecastEntries,
+    maxValue: yAxisMax,
+    onAdjust: handleMedianAdjust,
+    height: chartHeight,
+    zoomedView,
+  };
+
+  const nextLabel = isLastRound ? 'Finish' : 'Next forecast';
+
+  return (
+    <Paper shadow="sm" p={{ base: 'sm', sm: 'lg' }} radius="md" withBorder>
+      <Stack gap="md">
+        <Group justify="space-between" wrap="wrap" align="center">
+          <Group gap="sm">
+            <div>
+              <Title order={2} fz={{ base: 20, sm: 28 }}>Weekly Incidence Forecast</Title>
+              <Text size="sm" c="dimmed" fw={500}>
+                📅 {getWeekDateRange(scenario.challengeDate)}
+              </Text>
+            </div>
+          </Group>
+        </Group>
+
+        <Box>
+          <Text size="sm" c="dimmed" mb="xs">
+            We can display a custom text here!
+          </Text>
+          <Group gap="xs" wrap="wrap">
+            <Text size="sm" fw={400}>
+              Predict
+            </Text>
+            <Badge size="md" variant="filled" color="blue" radius="sm">
+              {scenario?.dataset?.label || 'hospitalization'}
+            </Badge>
+            <Text size="sm" fw={400}>
+              in
+            </Text>
+            <Badge size="md" variant="filled" color="grape" radius="sm">
+              {scenario?.location?.name}
+            </Badge>
+            <Text size="sm" fw={400}>
+              at
+            </Text>
+            <Badge size="md" variant="filled" color="teal" radius="sm">
+              {scenario?.forecastDate}
+            </Badge>
+          </Group>
+        </Box>
+
+        <Divider />
+
+        <Group justify="space-between" align="center" wrap="wrap">
+          <Stepper
+            active={inputMode === 'median' ? 0 : 1}
+            onStepClick={(step) => {
+              if (step === 0) setInputMode('median');
+              else if (step === 1) setInputMode('intervals');
+            }}
+            allowNextStepsSelect={false}
+            size={isMobile ? 'xs' : 'sm'}
+            style={{ flex: 1 }}
+          >
+            <Stepper.Step
+              label="Median"
+              description={isMobile ? undefined : 'Point forecasts'}
+              completedIcon={<IconCheck size={16} />}
+            />
+            <Stepper.Step
+              label="80% Interval"
+              description={isMobile ? undefined : 'Uncertainty'}
+              completedIcon={<IconCheck size={16} />}
+            />
+          </Stepper>
+        </Group>
+
+        {saveError && (
+          <Alert icon={<IconAlertTriangle size={16} />} title="Forecast not saved" color="red">
+            {saveError}
+          </Alert>
+        )}
+
+        {inputMode === 'thankYou' && (
+          <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: isMobile ? '1rem' : '2rem' }}>
+            <Title order={3}>Thank You for Your Participation! 🎉</Title>
+            <Text size="lg" c="dimmed">
+              Your forecast has been submitted.
+            </Text>
+            <Group justify="center" gap="sm">
+              <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
+                Edit Your Forecast
+              </Button>
+              <Button onClick={onNext} size="md" rightSection="→">
+                {nextLabel}
+              </Button>
+            </Group>
+          </Stack>
+        )}
+
+        {alreadySubmitted && inputMode !== 'thankYou' && !isEditing && (
+          <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: isMobile ? '1rem' : '2rem' }}>
+            <Title order={3}>You've already forecasted this one</Title>
+            <Text size="sm" c="dimmed">
+              The underlying data hasn't changed since your last submission. You can still edit your forecast.
+            </Text>
+            <Group justify="center" gap="sm">
+              <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
+                Edit Your Forecast
+              </Button>
+              <Button onClick={onNext} size="md" rightSection="→">
+                {isLastRound ? 'Finish' : 'Skip to next forecast'}
+              </Button>
+            </Group>
+          </Stack>
+        )}
+
+        {inputMode !== 'thankYou' && (!alreadySubmitted || isEditing) && (
+          inputMode === 'intervals' ? (
+            <Grid gutter="lg">
+              <Grid.Col span={{ base: 12, lg: 7 }}>
+                <Stack gap="md">
+                  {chartHeader}
+                  <Box style={{ width: '100%', height: chartHeight }}>
+                    <ForecastleChartCanvas {...sharedChartProps} showIntervals={true} />
+                  </Box>
+                  <Text size="sm" c="dimmed">
+                    Drag the handles to adjust interval bounds, or use the sliders for precise control.
+                  </Text>
+                </Stack>
+              </Grid.Col>
+              <Grid.Col span={{ base: 12, lg: 5 }}>
+                <Stack gap="md" h="100%">
+                  <Title order={5}>Uncertainty Intervals</Title>
+                  <ForecastleInputControls
+                    entries={forecastEntries}
+                    onChange={setForecastEntries}
+                    maxValue={yAxisMax}
+                    mode="intervals"
+                    horizonDates={horizonDates}
+                  />
+                  <Box mt="auto">
+                    <Stack gap="sm">
+                      <Button
+                        onClick={handleResetIntervals}
+                        variant="light"
+                        size="sm"
+                        fullWidth
+                        color="gray"
+                        leftSection={<IconRefresh size={16} />}
+                      >
+                        Reset to Default
+                      </Button>
+                      <Button onClick={handleSubmit} size="md" fullWidth>
+                        Submit & Thank You
+                      </Button>
+                    </Stack>
+                  </Box>
+                </Stack>
+              </Grid.Col>
+            </Grid>
+          ) : (
+            <Grid gutter="lg">
+              <Grid.Col span={{ base: 12, lg: 7 }}>
+                <Stack gap="md">
+                  {chartHeader}
+                  <Box style={{ width: '100%', height: chartHeight }}>
+                    <ForecastleChartCanvas {...sharedChartProps} showIntervals={false} />
+                  </Box>
+                  <Text size="sm" c="dimmed">
+                    Drag the handles to set your median forecast for each week ahead.
+                  </Text>
+                </Stack>
+              </Grid.Col>
+              <Grid.Col span={{ base: 12, lg: 5 }}>
+                <Stack gap="md" h="100%">
+                  <Title order={5}>Median Forecasts</Title>
+                  <ForecastleInputControls
+                    entries={forecastEntries}
+                    onChange={setForecastEntries}
+                    maxValue={yAxisMax}
+                    mode="median"
+                    horizonDates={horizonDates}
+                  />
+                  <Box mt="auto">
+                    <Stack gap="sm">
+                      <Button
+                        onClick={handleResetMedians}
+                        variant="light"
+                        size="sm"
+                        fullWidth
+                        color="gray"
+                        leftSection={<IconRefresh size={16} />}
+                      >
+                        Reset to Default
+                      </Button>
+                      <Button
+                        onClick={() => setInputMode('intervals')}
+                        size="md"
+                        fullWidth
+                        rightSection="→"
+                      >
+                        Next: Set 80% Interval
+                      </Button>
+                    </Stack>
+                  </Box>
+                </Stack>
+              </Grid.Col>
+            </Grid>
+          )
+        )}
+      </Stack>
+    </Paper>
+  );
+};
+
+// =============================================================================
+// Game: loads the data and walks through the forecast rounds
+// =============================================================================
+
+const ForecastleGame = () => {
+  const [searchParams] = useSearchParams();
+  const playDate = searchParams.get('play_date') || null;
+  const isMobile = useMediaQuery('(max-width: 48em)');
+
+  const [scenarios, setScenarios] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [finished, setFinished] = useState(false);
+
+  // Chart preferences are shared by all rounds
+  const [zoomedView, setZoomedView] = useState(true);
+  const [showMoreSeasons, setShowMoreSeasons] = useState(false);
+
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const response = await fetch(`${import.meta.env.BASE_URL}processed_data/your-data.json`);
+        if (!response.ok) {
+          throw new Error(`Failed to load data: ${response.status}`);
+        }
+        const rawData = await response.json();
+        // New format: { datasets: [...] }. Old format: a single dataset at the top level.
+        const datasets = Array.isArray(rawData.datasets) ? rawData.datasets : [rawData];
+
+        const built = datasets
+          .map((dataset) => buildScenario(dataset, playDate))
+          .filter((scenario) => scenario.groundTruthSeries.length > 0);
+        if (built.length === 0) {
+          throw new Error('The data file contains no usable dataset.');
+        }
+
+        console.log('Scenarios built:', built.map((s) => `${s.key} (${s.groundTruthSeries.length} weeks)`));
+        setScenarios(built);
+        setActiveIndex(0);
+        setFinished(false);
+      } catch (err) {
+        console.error('Error loading data:', err);
+        setError(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadData();
+  }, [playDate]);
+
+  const scrollToTop = () => {
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const goToRound = (index) => {
+    setActiveIndex(index);
+    setFinished(false);
+    scrollToTop();
+  };
+
+  const handleNext = () => {
+    if (activeIndex >= scenarios.length - 1) {
+      setFinished(true);
+    } else {
+      setActiveIndex((index) => index + 1);
+    }
+    scrollToTop();
   };
 
   const renderContent = () => {
@@ -379,7 +701,7 @@ const ForecastleGame = () => {
       );
     }
 
-    if (!scenario) {
+    if (scenarios.length === 0) {
       return (
         <Alert icon={<IconAlertTriangle size={16} />} title="No challenge available" color="yellow">
           Please check back later for the next Forecastle challenge.
@@ -387,291 +709,75 @@ const ForecastleGame = () => {
       );
     }
 
-    const latestValue = Number.isFinite(latestObservationValue) ? latestObservationValue : 0;
-    const baseMax = latestValue > 0 ? latestValue * 2 : 1;
-    const userMaxCandidate = Math.max(
-      ...forecastEntries.map((entry) => (entry.median ?? 0) + (entry.width80 ?? 0)),
-      0,
-    );
-    const yAxisMax = Math.max(baseMax, userMaxCandidate * 1.1 || 0, latestObservationValue, 1);
-    const horizonDates = scenario.horizons.map((horizon) => addWeeksToDate(scenario.forecastDate, horizon));
-    // The legend needs some extra room when four seasons are listed on a narrow screen
-    const chartHeight = isMobile ? (showMoreSeasons ? 340 : 300) : 380;
-
-    // "Show More Seasons" only makes sense if the data contains older seasons
-    const hasMoreSeasons =
-      scenario.twoBeforeSeasonSeries.length > 0 || scenario.threeBeforeSeasonSeries.length > 0;
-
-    const handleMedianAdjust = (index, field, value) => {
-      setForecastEntries((prevEntries) =>
-        prevEntries.map((entry, idx) => {
-          if (idx !== index) return entry;
-          const nextEntry = { ...entry };
-          if (field === 'median') {
-            const oldMedian = entry.median;
-            const newMedian = Math.max(0, value);
-            const medianShift = newMedian - oldMedian;
-            nextEntry.median = newMedian;
-            if (entry.lower80 !== undefined && entry.upper80 !== undefined) {
-              nextEntry.lower80 = Math.max(0, entry.lower80 + medianShift);
-              nextEntry.upper80 = entry.upper80 + medianShift;
-            }
-          } else if (field === 'interval80') {
-            const [lower, upper] = value;
-            nextEntry.lower80 = Math.max(0, lower);
-            nextEntry.upper80 = Math.max(lower, upper);
-            nextEntry.width80 = Math.max(nextEntry.upper80 - entry.median, entry.median - nextEntry.lower80);
-          } else {
-            nextEntry[field] = Math.max(0, value);
-          }
-          return nextEntry;
-        }),
-      );
-      setSubmissionErrors({});
-      if (submittedPayload) {
-        setSubmittedPayload(null);
-      }
-    };
-
-    // Title + the two chart switches (shared by the median and the interval view)
-    const chartHeader = (
-      <Group justify="space-between" align="center" wrap="wrap" gap="xs">
-        <Title order={5}>Interactive Chart</Title>
-        <Group gap="md" wrap="wrap">
-          <Switch
-            label="Show Whole Season"
-            checked={!zoomedView}
-            onChange={(event) => setZoomedView(!event.currentTarget.checked)}
-            color="red"
-            size={isMobile ? 'sm' : 'md'}
-          />
-          {hasMoreSeasons && (
-            <Switch
-              label="Show More Seasons"
-              checked={showMoreSeasons}
-              onChange={(event) => setShowMoreSeasons(event.currentTarget.checked)}
-              color="red"
-              size={isMobile ? 'sm' : 'md'}
-            />
-          )}
-        </Group>
-      </Group>
-    );
-
-    // Props that are identical for both chart views
-    const sharedChartProps = {
-      groundTruthSeries: scenario.groundTruthSeries,
-      previousSeasonSeries: scenario.previousSeasonSeries,
-      twoBeforeSeasonSeries: scenario.twoBeforeSeasonSeries,
-      threeBeforeSeasonSeries: scenario.threeBeforeSeasonSeries,
-      seasonLabels: scenario.seasons,
-      showMoreSeasons,
-      horizonDates,
-      entries: forecastEntries,
-      maxValue: yAxisMax,
-      onAdjust: handleMedianAdjust,
-      height: chartHeight,
-      zoomedView,
-    };
-
-    return (
-      <Stack gap="lg">
-        <Paper shadow="sm" p={{ base: 'sm', sm: 'lg' }} radius="md" withBorder>
-          <Stack gap="md">
-            <Group justify="space-between" wrap="wrap" align="center">
-              <Group gap="sm">
-                <div>
-                  <Title order={2} fz={{ base: 20, sm: 28 }}>Weekly Incidence Forecast</Title>
-                  <Text size="sm" c="dimmed" fw={500}>
-                    📅 {getWeekDateRange(scenario.challengeDate)}
-                  </Text>
-                </div>
-              </Group>
-            </Group>
-
-            <Box>
-              <Text size="sm" c="dimmed" mb="xs">
-                We can display a custom text here!
-              </Text>
-              <Group gap="xs" wrap="wrap">
-                <Text size="sm" fw={400}>
-                  Predict
-                </Text>
-                <Badge size="md" variant="filled" color="blue" radius="sm">
-                  {scenario?.dataset?.label || 'hospitalization'}
-                </Badge>
-                <Text size="sm" fw={400}>
-                  in
-                </Text>
-                <Badge size="md" variant="filled" color="grape" radius="sm">
-                  {scenario?.location?.name}
-                </Badge>
-                <Text size="sm" fw={400}>
-                  at
-                </Text>
-                <Badge size="md" variant="filled" color="teal" radius="sm">
-                  {scenario?.forecastDate}
-                </Badge>
-              </Group>
-            </Box>
-
-            <Divider />
-
-            <Group justify="space-between" align="center" wrap="wrap">
-              <Stepper
-                active={inputMode === 'median' ? 0 : 1}
-                onStepClick={(step) => {
-                  if (step === 0) setInputMode('median');
-                  else if (step === 1) setInputMode('intervals');
-                }}
-                allowNextStepsSelect={false}
-                size={isMobile ? 'xs' : 'sm'}
-                style={{ flex: 1 }}
-              >
-                <Stepper.Step
-                  label="Median"
-                  description={isMobile ? undefined : 'Point forecasts'}
-                  completedIcon={<IconCheck size={16} />}
-                />
-                <Stepper.Step
-                  label="80% Interval"
-                  description={isMobile ? undefined : 'Uncertainty'}
-                  completedIcon={<IconCheck size={16} />}
-                />
-              </Stepper>
-            </Group>
-
-            {saveError && (
-              <Alert icon={<IconAlertTriangle size={16} />} title="Forecast not saved" color="red">
-                {saveError}
-              </Alert>
-            )}
-
-            {inputMode === 'thankYou' && (
-              <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: isMobile ? '1rem' : '2rem' }}>
-                <Title order={3}>Thank You for Your Participation! 🎉</Title>
-                <Text size="lg" c="dimmed">
-                  Your forecast has been submitted.
-                </Text>
-                <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
-                  Edit Your Forecast
+    if (finished) {
+      return (
+        <Paper shadow="sm" p={{ base: 'md', sm: 'xl' }} radius="md" withBorder>
+          <Stack gap="lg" align="center" style={{ textAlign: 'center' }}>
+            <Title order={2}>All forecasts submitted 🎉</Title>
+            <Text c="dimmed">
+              Thank you for your participation! You can go back to any of your forecasts and edit it.
+            </Text>
+            <Stack gap="xs" w="100%" maw={420}>
+              {scenarios.map((scenario, index) => (
+                <Button
+                  key={scenario.key}
+                  variant="light"
+                  fullWidth
+                  onClick={() => goToRound(index)}
+                >
+                  {index + 1}. {scenario.dataset.label} – {scenario.location.name}
                 </Button>
-              </Stack>
-            )}
-
-            {alreadySubmitted && inputMode !== 'thankYou' && !isEditing && (
-              <Stack gap="lg" align="center" style={{ textAlign: 'center', padding: isMobile ? '1rem' : '2rem' }}>
-                <Title order={3}>You've already forecasted this one</Title>
-                <Text size="sm" c="dimmed">
-                  The underlying data hasn't changed since your last submission. You can still edit your forecast below.
-                </Text>
-                <Button onClick={handleEditForecast} variant="outline" color="blue" size="md">
-                  Edit Your Forecast
-                </Button>
-              </Stack>
-            )}
-
-            {inputMode !== 'thankYou' && (!alreadySubmitted || isEditing) && (
-              inputMode === 'intervals' ? (
-                <Grid gutter="lg">
-                  <Grid.Col span={{ base: 12, lg: 7 }}>
-                    <Stack gap="md">
-                      {chartHeader}
-                      <Box style={{ width: '100%', height: chartHeight }}>
-                        <ForecastleChartCanvas {...sharedChartProps} showIntervals={true} />
-                      </Box>
-                      <Text size="sm" c="dimmed">
-                        Drag the handles to adjust interval bounds, or use the sliders for precise control.
-                      </Text>
-                    </Stack>
-                  </Grid.Col>
-                  <Grid.Col span={{ base: 12, lg: 5 }}>
-                    <Stack gap="md" h="100%">
-                      <Title order={5}>Uncertainty Intervals</Title>
-                      <ForecastleInputControls
-                        entries={forecastEntries}
-                        onChange={setForecastEntries}
-                        maxValue={yAxisMax}
-                        mode="intervals"
-                        horizonDates={horizonDates}
-                      />
-                      <Box mt="auto">
-                        <Stack gap="sm">
-                          <Button
-                            onClick={handleResetIntervals}
-                            variant="light"
-                            size="sm"
-                            fullWidth
-                            color="gray"
-                            leftSection={<IconRefresh size={16} />}
-                          >
-                            Reset to Default
-                          </Button>
-                          <Button
-                            onClick={handleSubmit}
-                            size="md"
-                            fullWidth
-                            disabled={inputMode === 'scoring'}
-                          >
-                            Submit & Thank You
-                          </Button>
-                        </Stack>
-                      </Box>
-                    </Stack>
-                  </Grid.Col>
-                </Grid>
-              ) : (
-                <Grid gutter="lg">
-                  <Grid.Col span={{ base: 12, lg: 7 }}>
-                    <Stack gap="md">
-                      {chartHeader}
-                      <Box style={{ width: '100%', height: chartHeight }}>
-                        <ForecastleChartCanvas {...sharedChartProps} showIntervals={false} />
-                      </Box>
-                      <Text size="sm" c="dimmed">
-                        Drag the handles to set your median forecast for each week ahead.
-                      </Text>
-                    </Stack>
-                  </Grid.Col>
-                  <Grid.Col span={{ base: 12, lg: 5 }}>
-                    <Stack gap="md" h="100%">
-                      <Title order={5}>Median Forecasts</Title>
-                      <ForecastleInputControls
-                        entries={forecastEntries}
-                        onChange={setForecastEntries}
-                        maxValue={yAxisMax}
-                        mode="median"
-                        horizonDates={horizonDates}
-                      />
-                      <Box mt="auto">
-                        <Stack gap="sm">
-                          <Button
-                            onClick={handleResetMedians}
-                            variant="light"
-                            size="sm"
-                            fullWidth
-                            color="gray"
-                            leftSection={<IconRefresh size={16} />}
-                          >
-                            Reset to Default
-                          </Button>
-                          <Button
-                            onClick={() => setInputMode('intervals')}
-                            size="md"
-                            fullWidth
-                            rightSection="→"
-                          >
-                            Next: Set 80% Interval
-                          </Button>
-                        </Stack>
-                      </Box>
-                    </Stack>
-                  </Grid.Col>
-                </Grid>
-              )
-            )}
+              ))}
+            </Stack>
           </Stack>
         </Paper>
+      );
+    }
+
+    const activeScenario = scenarios[activeIndex];
+    const progressValue = (activeIndex / scenarios.length) * 100;
+
+    return (
+      <Stack gap="md">
+        {scenarios.length > 1 && (
+          <Paper p="sm" radius="md" withBorder>
+            <Group justify="space-between" align="center" wrap="wrap" gap="xs">
+              <Text fw={600} size="sm">
+                Forecast {activeIndex + 1} of {scenarios.length}
+              </Text>
+              <Group gap={6}>
+                {scenarios.map((scenario, index) => (
+                  <Badge
+                    key={scenario.key}
+                    size="md"
+                    circle
+                    variant={index === activeIndex ? 'filled' : 'light'}
+                    color={index < activeIndex ? 'green' : 'blue'}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => goToRound(index)}
+                    title={`${scenario.dataset.label} – ${scenario.location.name}`}
+                  >
+                    {index + 1}
+                  </Badge>
+                ))}
+              </Group>
+            </Group>
+            <Progress value={progressValue} size="sm" mt="xs" />
+          </Paper>
+        )}
+
+        {/* key: every round starts with a fresh state */}
+        <ForecastleRound
+          key={activeScenario.key}
+          scenario={activeScenario}
+          isLastRound={activeIndex === scenarios.length - 1}
+          onNext={handleNext}
+          isMobile={isMobile}
+          zoomedView={zoomedView}
+          setZoomedView={setZoomedView}
+          showMoreSeasons={showMoreSeasons}
+          setShowMoreSeasons={setShowMoreSeasons}
+        />
       </Stack>
     );
   };

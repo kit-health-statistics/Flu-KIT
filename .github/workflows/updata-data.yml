@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: "Run even if the RKI file is unchanged"
+        description: "Commit and deploy even if the data is unchanged"
         type: boolean
         default: false
 
@@ -22,51 +22,59 @@ env:
   RAW_DIR: app/public/raw_data
   PROCESSED_DIR: app/public/processed_data
   PAST_DIR: app/public/past_data
-  RAW_FILE: GrippeWeb_Daten_des_Wochenberichts.tsv
-  SOURCE_URL: https://raw.githubusercontent.com/robert-koch-institut/GrippeWeb_Daten_des_Wochenberichts/main/GrippeWeb_Daten_des_Wochenberichts.tsv
+  NEW_RAW: /tmp/new_raw
+  GRIPPEWEB_URL: https://raw.githubusercontent.com/robert-koch-institut/GrippeWeb_Daten_des_Wochenberichts/main/GrippeWeb_Daten_des_Wochenberichts.tsv
+  ARE_URL: https://raw.githubusercontent.com/robert-koch-institut/ARE-Konsultationsinzidenz/main/ARE-Konsultationsinzidenz.tsv
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download latest TSV
+      - name: Download the RKI TSV files
         run: |
-          mkdir -p "$RAW_DIR"
-          curl -fsSL "$SOURCE_URL" -o /tmp/new.tsv
-          test -s /tmp/new.tsv
+          mkdir -p "$NEW_RAW"
+          curl -fsSL "$GRIPPEWEB_URL" -o "$NEW_RAW/GrippeWeb_Daten_des_Wochenberichts.tsv"
+          curl -fsSL "$ARE_URL" -o "$NEW_RAW/ARE-Konsultationsinzidenz.tsv"
+          test -s "$NEW_RAW/GrippeWeb_Daten_des_Wochenberichts.tsv"
+          test -s "$NEW_RAW/ARE-Konsultationsinzidenz.tsv"
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      # Installs jsonlite and rsurvstat (and its dependencies, e.g. sf) as binaries and caches them
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::jsonlite
+            any::rsurvstat
+          cache-version: 1
+
+      - name: Build the JSON (to a temp file first)
+        run: Rscript scripts/process_data.R "$NEW_RAW" /tmp/your-data.json
 
       - name: Check whether the data changed
         id: changed
         run: |
-          if [ "${{ inputs.force }}" != "true" ] && [ -f "$RAW_DIR/$RAW_FILE" ] && cmp -s /tmp/new.tsv "$RAW_DIR/$RAW_FILE"; then
+          if [ "${{ inputs.force }}" != "true" ] && [ -f "$PROCESSED_DIR/your-data.json" ] && cmp -s /tmp/your-data.json "$PROCESSED_DIR/your-data.json"; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "RKI file unchanged, nothing to do."
+            echo "Processed data unchanged, nothing to do."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install R
+      - name: Archive the old JSON and install the new files
         if: steps.changed.outputs.changed == 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends r-base-core r-cran-jsonlite
-
-      - name: Process new data (to a temp file first)
-        if: steps.changed.outputs.changed == 'true'
-        run: Rscript scripts/process_data.R /tmp/new.tsv /tmp/your-data.json
-
-      - name: Archive old JSON and install new files
-        if: steps.changed.outputs.changed == 'true'
-        run: |
-          mkdir -p "$PAST_DIR" "$PROCESSED_DIR"
+          mkdir -p "$RAW_DIR" "$PAST_DIR" "$PROCESSED_DIR"
           DATE=$(date +%d.%m.%Y)
           if [ -f "$PROCESSED_DIR/your-data.json" ]; then
             mv "$PROCESSED_DIR/your-data.json" "$PAST_DIR/data-$DATE.json"
           fi
-          cp /tmp/new.tsv "$RAW_DIR/$RAW_FILE"
+          cp "$NEW_RAW"/* "$RAW_DIR/"
           cp /tmp/your-data.json "$PROCESSED_DIR/your-data.json"
 
       - name: Commit and push
